@@ -1,0 +1,13 @@
+{
+  "name": "dsh-android-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "npm project whose production install is the DSH-Android engine tree (dsh pinned exactly).",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.2"
+  },
+  "overrides": {
+    "zod": "4.4.3"
+  },
+  "//overrides": "dsh pins zod 4.4.3 exactly in ~60 packages; without this npm hoists a newer zod and nests 50 copies of 4.4.3 (~250 MiB). 4.4.3 satisfies every other range in the tree."
+}

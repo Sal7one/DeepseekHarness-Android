@@ -1,0 +1,21 @@
+--- a/node-addon-native-custom-loader/lib/index.js
++++ b/node-addon-native-custom-loader/lib/index.js
+@@ -511,6 +511,18 @@
+     const product = productForPackage(packagePrefix);
+     const backendPreference = normalizeBackend(options.backend || process.env.NARB_BACKEND);
+     const attempts = [];
++    // DSH-Android: load the app-shipped binding from $DSH_NATIVE_DIR/libdsh_<product>.so
++    // (nativeLibraryDir) with process.dlopen; no tmpdir cache copy is made.
++    if ((process.env.DSH_NATIVE_DIR || process.platform === 'android') && product === 'require-builtin') {
++        const nativeDir = process.env.DSH_NATIVE_DIR;
++        if (!nativeDir)
++            throw new Error('node-addon-require-builtin on android requires DSH_NATIVE_DIR (libdsh_require_builtin.so)');
++        const file = node_path_1.default.join(nativeDir, 'libdsh_require_builtin.so');
++        const module = { exports: {} };
++        process.dlopen(module, file);
++        validateLoadedBinding(module.exports, file, product);
++        return { binding: module.exports, path: file, source: 'dsh-native-dir', attempts };
++    }
+     if (process.env.NARB_DISABLE_OPTIONAL_PACKAGE !== '1') {
+         for (const candidate of optionalPackageCandidates(packageDir, packagePrefix)) {
+             const result = tryRequirePackage(candidate, product);

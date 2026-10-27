@@ -1,0 +1,78 @@
+# DSH-Android profile layer. Applied after @deepseek-ai/dsh-base and
+# @deepseek-ai/dsh-sdk-app (see the `android` profile template); the user's
+# profile cordis.patch.yml and $DSH_HOME/cordis.patch.yml still apply on top.
+#
+# A patch replaces a row's whole `config`, so every config below is complete.
+
+# ── persona ────────────────────────────────────────────────────────────────
+- id: system-prompt
+  config:
+    personaPrefix: >-
+      You are DSH, an AI agent running on the user's own Android phone, powered
+      by the {{model}} model.
+
+# ── workspace: the app-private home directory, never the process cwd ─────────
+# The JNI launcher does not chdir; HOME is <filesDir>/home (ENGINE-CONTRACT §1).
+- id: sandbox-policy
+  config:
+    # Android has no bwrap/landlock/seatbelt chain (sandbox-local would fail
+    # closed). Run unconfined; every mutating tool is approval-gated instead
+    # (plugin-guard asks for shell/fs writes, plugin-device for device tools).
+    mode: danger-full-access
+    workspaceRoot: !!js "process.env.HOME || process.cwd()"
+
+- id: approval
+  config:
+    policy: ask
+
+- id: permission
+  config:
+    defaultPreset: android
+    presets:
+      android:
+        sandbox: danger-full-access
+        approval: ask
+        name: android
+        description: No OS sandbox on Android; every mutating action asks for approval.
+
+# ── rows a phone does not need ───────────────────────────────────────────────
+# Profile/package management is a Web/desktop surface (config-editor stays:
+# dsh-settings, which stores the llm-deepseek settings section, depends on it).
+- id: plugin-manager
+  disabled: true
+# Telemetry export is off on the phone (privacy; no feedback UI wired to it).
+- id: session-telemetry-otel
+  disabled: true
+# Programmatic tool calling (code execution runtime + workflow tool built on it).
+- id: ptc-runtime
+  disabled: true
+- id: workflow-ptc
+  disabled: true
+- id: tool-workflow
+  disabled: true
+# Office skills / primary-runtime dependency tooling (desktop only; also gated by env).
+- id: skill-office
+  disabled: true
+- id: workspace-dependencies
+  disabled: true
+# tmux context is meaningless on Android (no tmux).
+- id: tmux-context
+  disabled: true
+
+# ── DSH-Android plugins ────────────────────────────────────────────────────
+- insert:
+    - id: android-device
+      name: '@dsh-android/plugin-device'
+      config:
+        # Timeouts (ms) for capability/invoke; needsUnlock tools wait for the
+        # user to unlock the phone (the app resolves with device_locked_timeout).
+        invokeTimeoutMs: 120000
+        unlockTimeoutMs: 900000
+
+    - id: android-guard
+      name: '@dsh-android/plugin-guard'
+      config:
+        locale: !!js "process.env.DSH_ANDROID_LOCALE || ''"
+        # Tools that mutate state outside the device bridge and therefore ask
+        # for approval on every call (no OS sandbox on Android).
+        askTools: [bash, write, edit]
