@@ -1,0 +1,85 @@
+package io.github.jackwener.dsh.core.engine
+
+import android.app.Notification
+import android.app.Service
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Bundle
+import android.os.IBinder
+import android.os.ParcelFileDescriptor
+import android.os.Process
+import android.system.Os
+import android.system.OsConstants
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import io.github.jackwener.dsh.R
+import io.github.jackwener.dsh.core.platform.Notifications
+import java.io.File
+import java.io.FileDescriptor
+
+/**
+ * Hosts Node + dsh in the dedicated `:engine` process. Node can be started only once per process,
+ * so when it exits the whole process exits and the app restarts it on demand.
+ */
+class EngineService : Service() {
+    @Volatile private var started = false
+
+    override fun onCreate() {
+        super.onCreate()
+        val n: Notification = NotificationCompat.Builder(this, Notifications.CHANNEL_ENGINE)
+            .setSmallIcon(R.drawable.ic_stat_dsh)
+            .setContentTitle(getString(R.string.engine_running))
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+        startForeground(Notifications.ID_ENGINE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_NOT_STICKY
+
+    private val binder = object : IEngineService.Stub() {
+        override fun isRunning() = started
+
+        override fun start(env: Bundle): Bundle = synchronized(this) {
+            check(!started) { "engine already started in this process" }
+            started = true
+            val engineDir = EngineInstaller.install(this@EngineService)
+            val stdin = ParcelFileDescriptor.createPipe()   // [read, write]
+            val stdout = ParcelFileDescriptor.createPipe()
+            val nodeSide = FileDescriptor()
+            val appSide = FileDescriptor()
+            Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0, nodeSide, appSide)
+            // Keep the Node side open for the lifetime of the process (detached = never auto-closed).
+            val bridgeFd = ParcelFileDescriptor.dup(nodeSide).detachFd().also { Os.close(nodeSide) }
+            val stderrFile = File(cacheDir, "engine.log").apply { delete() }
+            val stderr = ParcelFileDescriptor.open(stderrFile,
+                ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_TRUNCATE)
+
+            env.keySet().forEach { key -> Os.setenv(key, env.getString(key) ?: "", true) }
+            Os.setenv("DSH_BRIDGE_FD", bridgeFd.toString(), true)
+            File(env.getString("TMPDIR") ?: cacheDir.path).mkdirs()
+            File(env.getString("HOME") ?: filesDir.path).mkdirs()
+
+            val args = arrayOf("node", File(engineDir, "node_modules/@deepseek-ai/dsh/lib/bin.js").path, "--profile", "android")
+            val inRead = stdin[0].detachFd()
+            val outWrite = stdout[1].detachFd()
+            val errWrite = stderr.detachFd()
+            Thread(null, {
+                val code = runCatching { NodeRuntime.nativeStart(args, inRead, outWrite, errWrite) }
+                    .onFailure { Log.e(TAG, "node crashed", it) }.getOrDefault(-1)
+                Log.i(TAG, "node exited with $code")
+                stopSelf()
+                Process.killProcess(Process.myPid())
+            }, "node-main", 16L * 1024 * 1024).start()
+            Bundle().apply {
+                putParcelable("sdk_in", stdin[1])
+                putParcelable("sdk_out", stdout[0])
+                putParcelable("bridge", ParcelFileDescriptor.dup(appSide).also { Os.close(appSide) })
+            }
+        }
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    private companion object { const val TAG = "EngineService" }
+}

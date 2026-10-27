@@ -32,7 +32,8 @@ Unmodified dsh SDK JSON-RPC 2.0, newline-delimited (`packages/sdk/protocol`). Th
 
 - `initialize { cwd: HOME, provider: "deepseek-official", model, approvalRequests: true, capabilities: { userQuestions: true } }`
 - `session/prompt`, `session/resume`, `session/wait`, `shutdown`
-- handles server requests `approval/request` and `user-question/ask`; consumes `session.event` / `session.status` notifications.
+- handles server requests `approval/request` (answer `allowed-once | rejected | cancelled`; requests from subagents carry `rootSessionId`, which owns the approval) and `user-question/ask`; consumes `session.event` / `session.status` notifications.
+- dsh 0.2.1-rc.2 lacks SDK approval/question requests; `js/patches/08` backports them from rc.3 (drop when upgrading).
 
 **Session id convention:** attended sessions use a random UUID. Sessions started by automations use `auto_<ruleId>_<uuid>`; the app auto-answers `approval/request` for these (allowed only if the tool is in the rule's whitelist, else `rejected`).
 
@@ -61,6 +62,9 @@ interface ToolResult {
 ```
 
 The app is authoritative for: which groups are enabled, runtime permissions, lock-state waiting (a `needsUnlock` call while locked is held by the app, which posts a "continue after unlock" notification; the request resolves after unlock, or with `device_locked_timeout`), and unattended whitelists.
+
+### Node → App notifications
+- `budget/exceeded { sessionId, kind, used, limit }` — a budget refused a step; the app shows it in the conversation.
 
 ### App → Node notifications
 - `capability/changed {}` — tool set changed (groups toggled, permission granted); the plugin re-lists.

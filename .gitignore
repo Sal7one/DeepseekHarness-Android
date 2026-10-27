@@ -10,3 +10,4 @@ node_modules/
 *.jks
 .env
 secrets/
+app/schemas/

@@ -1,0 +1,126 @@
+package io.github.jackwener.dsh.feature.settings
+
+import android.Manifest
+import android.app.AlarmManager
+import android.app.NotificationManager
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.os.PowerManager
+import android.provider.Settings
+import io.github.jackwener.dsh.core.model.ToolGroup
+import io.github.jackwener.dsh.service.DshAccessibilityService
+import io.github.jackwener.dsh.service.DshNotificationListener
+
+/** One grantable thing: how to check it, how to ask for it, and which capabilities need it. */
+data class PermissionItem(
+    val id: String,
+    val titleZh: String, val titleEn: String,
+    val whyZh: String, val whyEn: String,
+    val groups: Set<ToolGroup>,
+    /** Runtime permissions requested in-app; null when granted through a Settings screen. */
+    val runtime: List<String>? = null,
+    val restrictedSetting: Boolean = false,
+    val check: (Context) -> Boolean,
+    val intent: (Context) -> Intent? = { null },
+) {
+    fun title(zh: Boolean) = if (zh) titleZh else titleEn
+    fun why(zh: Boolean) = if (zh) whyZh else whyEn
+}
+
+object PermissionCatalog {
+    private fun pkgUri(c: Context) = Uri.parse("package:${c.packageName}")
+    private fun granted(c: Context, p: String) = c.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    fun appDetails(c: Context) = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri(c))
+
+    val all: List<PermissionItem> = listOf(
+        PermissionItem("notifications", "通知", "Notifications", "任务完成、需要确认时提醒你", "Tell you when tasks finish or need approval",
+            ToolGroup.entries.toSet(), runtime = if (Build.VERSION.SDK_INT >= 33) listOf(Manifest.permission.POST_NOTIFICATIONS) else null,
+            check = { Build.VERSION.SDK_INT < 33 || granted(it, Manifest.permission.POST_NOTIFICATIONS) }),
+        PermissionItem("battery", "不受电池优化限制", "Unrestricted battery", "锁屏和后台时也能执行任务、调用模型", "Run tasks and reach the model while the phone sleeps",
+            ToolGroup.entries.toSet(),
+            check = { it.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(it.packageName) },
+            intent = { Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, pkgUri(it)) }),
+        PermissionItem("files", "所有文件访问", "All files access", "查找、整理、清理你的文件", "Find, organise and clean up files",
+            setOf(ToolGroup.Files),
+            check = { Environment.isExternalStorageManager() },
+            intent = { Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkgUri(it)) }),
+        PermissionItem("accessibility", "无障碍（屏幕操作）", "Accessibility (screen control)", "读取屏幕、替你点按和输入", "Read the screen, tap and type for you",
+            setOf(ToolGroup.Screen, ToolGroup.Apps), restrictedSetting = true,
+            check = { DshAccessibilityService.instance != null || a11yEnabled(it) },
+            intent = { Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS) }),
+        PermissionItem("notif_access", "通知使用权", "Notification access", "读取通知、通知触发自动化、控制媒体播放", "Read notifications, notification triggers, media control",
+            setOf(ToolGroup.Notifications, ToolGroup.Media, ToolGroup.Rules), restrictedSetting = true,
+            check = { DshNotificationListener.instance != null || listenerEnabled(it) },
+            intent = { c -> if (Build.VERSION.SDK_INT >= 30) Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, ComponentName(c, DshNotificationListener::class.java).flattenToString())
+                else Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS) }),
+        PermissionItem("exact_alarm", "闹钟和提醒", "Alarms & reminders", "定时自动化准点执行", "Run timed automations on time",
+            setOf(ToolGroup.Rules),
+            check = { it.getSystemService(AlarmManager::class.java).canScheduleExactAlarms() },
+            intent = { Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, pkgUri(it)) }),
+        PermissionItem("dnd", "勿扰模式权限", "Do Not Disturb access", "切换静音和勿扰", "Switch silent mode and Do Not Disturb",
+            setOf(ToolGroup.System),
+            check = { it.getSystemService(NotificationManager::class.java).isNotificationPolicyAccessGranted },
+            intent = { Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS) }),
+        PermissionItem("write_settings", "修改系统设置", "Modify system settings", "调节亮度", "Adjust brightness",
+            setOf(ToolGroup.System),
+            check = { Settings.System.canWrite(it) },
+            intent = { Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, pkgUri(it)) }),
+        PermissionItem("location", "位置", "Location", "按 Wi‑Fi 名称或地点触发自动化", "Trigger automations by Wi‑Fi name or place",
+            setOf(ToolGroup.Rules), runtime = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+            check = { granted(it, Manifest.permission.ACCESS_FINE_LOCATION) }),
+        PermissionItem("bg_location", "后台位置", "Background location", "离开 App 时也能按地点触发", "Place triggers while DSH is closed",
+            setOf(ToolGroup.Rules),
+            check = { granted(it, Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
+            intent = { appDetails(it) }),
+        PermissionItem("bluetooth", "附近设备（蓝牙）", "Nearby devices", "按蓝牙设备名称触发自动化", "Trigger automations by Bluetooth device",
+            setOf(ToolGroup.Rules), runtime = listOf(Manifest.permission.BLUETOOTH_CONNECT),
+            check = { granted(it, Manifest.permission.BLUETOOTH_CONNECT) }),
+        PermissionItem("comms", "联系人、短信、通话记录、日历", "Contacts, SMS, calls, calendar", "查联系人、读短信、记日程、发短信", "Look up contacts, read SMS, add events, send SMS",
+            setOf(ToolGroup.Comms), runtime = listOf(Manifest.permission.READ_CONTACTS, Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS,
+                Manifest.permission.READ_CALL_LOG, Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR),
+            restrictedSetting = true,
+            check = { granted(it, Manifest.permission.READ_CONTACTS) && granted(it, Manifest.permission.READ_SMS) }),
+        PermissionItem("overlay", "悬浮窗", "Display over other apps", "显示悬浮球", "Show the floating button",
+            emptySet(),
+            check = { Settings.canDrawOverlays(it) },
+            intent = { Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, pkgUri(it)) }),
+    )
+
+    fun forGroups(groups: Set<ToolGroup>) = all.filter { it.groups.any(groups::contains) }
+
+    private fun a11yEnabled(c: Context): Boolean {
+        val flat = Settings.Secure.getString(c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+        return flat.contains(ComponentName(c, DshAccessibilityService::class.java).flattenToString())
+    }
+
+    private fun listenerEnabled(c: Context): Boolean {
+        val flat = Settings.Secure.getString(c.contentResolver, "enabled_notification_listeners") ?: return false
+        return flat.contains(ComponentName(c, DshNotificationListener::class.java).flattenToString())
+    }
+
+    /** Best-effort deep links to vendor "autostart / background" screens; falls back to App info. */
+    fun vendorKeepAlive(c: Context): Pair<String, Intent> {
+        val m = Build.MANUFACTURER.lowercase()
+        val (tip, comp) = when {
+            "xiaomi" in m || "redmi" in m || "poco" in m -> "小米/红米：自启动 → 打开 DSH；省电策略 → 无限制" to
+                ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+            "huawei" in m || "honor" in m -> "华为/荣耀：应用启动管理 → DSH → 关闭“自动管理”，允许自启动、关联启动、后台活动" to
+                ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
+            "oppo" in m || "realme" in m || "oneplus" in m -> "OPPO/一加/真我：应用详情 → 耗电管理 → 允许后台行为、允许自启动" to
+                ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")
+            "vivo" in m || "iqoo" in m -> "vivo/iQOO：i管家 → 应用管理 → 自启动；电池 → 后台耗电管理 → 允许" to
+                ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")
+            "samsung" in m -> "三星：设置 → 电池 → 后台使用限制 → 将 DSH 加入“从不休眠的应用”" to null
+            else -> "在“应用信息 → 电池”中选择“不受限制”" to null
+        }
+        val intent = comp?.let { Intent().setComponent(it) }?.takeIf { it.resolveActivity(c.packageManager) != null } ?: appDetails(c)
+        return tip to intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+}
