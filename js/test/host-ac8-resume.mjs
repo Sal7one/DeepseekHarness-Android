@@ -7,13 +7,15 @@
 //        node js/test/host-ac8-resume.mjs [engine.zip]
 // KILL_ON=request/context KILL_AFTER_MS=0 kills right after a burst of notifications, which shows
 // dsh notifying events before they are durable (the next generation re-issues those seqs).
-// The API key is read from ~/.config/kevin-secrets/deepseek_api_key (never printed).
+// The API key is read from the file named by $DSH_E2E_KEY_FILE (default ~/.config/dsh/deepseek_api_key; never printed).
 import { spawn, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const AGENT = '/home/jzm/.slock/agents/abb9a111-c448-49cf-9c6b-9462eb0e445e'
+// Repo root; toolchains/ (gitignored) holds build outputs and scratch dirs.
+const AGENT = fileURLToPath(new URL('../..', import.meta.url))
 const zipPath = process.argv[2] ?? join(AGENT, 'toolchains/out/engine/engine.zip')
 const nativeDir = join(AGENT, 'toolchains/out/engine-build/host-native')
 const root = join(AGENT, 'toolchains/tmp', `ac8-${Date.now()}`)
@@ -36,7 +38,7 @@ const dshHome = join(root, 'dsh-home'), home = join(root, 'home'), tmp = join(ro
 mkdirSync(home, { recursive: true }); mkdirSync(tmp, { recursive: true })
 const env = { PATH: process.env.PATH, LANG: 'C.UTF-8', DSH_HOME: dshHome, HOME: home, TMPDIR: tmp, SHELL: '/bin/sh',
   DSH_NATIVE_DIR: nativeDir, DSH_ANDROID_LOCALE: 'en-US', DSH_TELEMETRY_DISABLED: '1',
-  DEEPSEEK_API_KEY: readFileSync(join(homedir(), '.config/kevin-secrets/deepseek_api_key'), 'utf8').trim() }
+  DEEPSEEK_API_KEY: readFileSync(process.env.DSH_E2E_KEY_FILE || join(homedir(), '.config/dsh/deepseek_api_key'), 'utf8').trim() }
 
 function peer(r, w, gen, onNote) {
   let buf = '', id = 0; const pending = new Map()

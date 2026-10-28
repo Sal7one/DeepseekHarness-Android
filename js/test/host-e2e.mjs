@@ -17,18 +17,20 @@
 //      HOME writes without approval, and an unattended run whose question is auto-answered.
 //
 // Usage: node js/test/host-e2e.mjs [engine.zip] [native-dir]
-// The API key is read from ~/.config/kevin-secrets/deepseek_api_key (never printed).
+// The API key is read from the file named by $DSH_E2E_KEY_FILE (default ~/.config/dsh/deepseek_api_key; never printed).
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const AGENT = '/home/jzm/.slock/agents/abb9a111-c448-49cf-9c6b-9462eb0e445e'
+// Repo root; toolchains/ (gitignored) holds build outputs and scratch dirs.
+const AGENT = fileURLToPath(new URL('../..', import.meta.url))
 const zipPath = resolve(process.argv[2] ?? join(AGENT, 'toolchains/out/engine/engine.zip'))
 const nativeDir = resolve(process.argv[3] ?? join(AGENT, 'toolchains/out/engine-build/host-native'))
-const keyFile = join(homedir(), '.config/kevin-secrets/deepseek_api_key')
+const keyFile = process.env.DSH_E2E_KEY_FILE || join(homedir(), '.config/dsh/deepseek_api_key')
 const root = join(AGENT, 'toolchains/tmp', `host-e2e-${Date.now()}`)
 const engineDir = process.env.E2E_ENGINE_DIR ? resolve(process.env.E2E_ENGINE_DIR) : join(root, 'engine')
 const logFile = join(root, 'e2e.log')

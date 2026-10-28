@@ -11,8 +11,10 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const AGENT = '/home/jzm/.slock/agents/abb9a111-c448-49cf-9c6b-9462eb0e445e'
+// Repo root; toolchains/ (gitignored) holds build outputs and scratch dirs.
+const AGENT = fileURLToPath(new URL('../..', import.meta.url))
 const zipPath = resolve(process.argv[2] ?? join(AGENT, 'toolchains/out/engine/engine.zip'))
 const nativeDir = resolve(process.argv[3] ?? join(AGENT, 'toolchains/out/engine-build/host-native'))
 const runs = Number(process.argv[4] ?? 5)

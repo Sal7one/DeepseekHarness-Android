@@ -13,7 +13,7 @@
 set -euo pipefail
 
 JS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGENT_DIR="${AGENT_DIR:-/home/jzm/.slock/agents/abb9a111-c448-49cf-9c6b-9462eb0e445e}"
+AGENT_DIR="${AGENT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"  # repo root; toolchains/ is gitignored
 OUT_DIR="${OUT_DIR:-$AGENT_DIR/toolchains/out/engine}"
 WORK_DIR="${WORK_DIR:-$AGENT_DIR/toolchains/out/engine-build}"
 export TMPDIR="${TMPDIR_OVERRIDE:-$AGENT_DIR/toolchains/tmp}"
