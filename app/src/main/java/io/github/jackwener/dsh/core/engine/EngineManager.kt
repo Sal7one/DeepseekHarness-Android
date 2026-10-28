@@ -188,6 +188,7 @@ class EngineManager @Inject constructor(
         putString("DSH_ANDROID_LOCALE", Locale.getDefault().toLanguageTag())
         putString("NODE_OPTIONS", "--max-old-space-size=768")
         putString("DSH_TELEMETRY_DISABLED", "1")
+        putString("NARB_DISABLE_NATIVE_CACHE", "1")
     }
 
     private fun Bundle.pfd(key: String): ParcelFileDescriptor =

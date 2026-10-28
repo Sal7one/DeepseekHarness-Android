@@ -16,6 +16,7 @@ import io.github.jackwener.dsh.R
 import io.github.jackwener.dsh.core.platform.Notifications
 import java.io.File
 import java.io.FileDescriptor
+import io.github.jackwener.dsh.engine.NodeRuntime
 
 /**
  * Hosts Node + dsh in the dedicated `:engine` process. Node can be started only once per process,
