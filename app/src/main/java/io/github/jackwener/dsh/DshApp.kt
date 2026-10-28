@@ -26,6 +26,8 @@ class DshApp : Application() {
         importDebugKey()
         TriggerEvents.init(this)
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+            // Import :engine crash records (ApplicationExitInfo / tombstones) from earlier runs.
+            io.github.jackwener.dsh.core.engine.EngineDiagnostics.collectExitInfo(this@DshApp)
             triggers.get().sync()
             if (settings.get().current().floatingBall) runCatching { FloatingBallService.setEnabled(this@DshApp, true) }
         }

@@ -159,6 +159,7 @@ private fun BottomDock(vm: HomeViewModel, composer: ComposerState, settings: Set
 fun ComposerSlot(vm: ConversationController, composer: ComposerState, settings: Settings, live: SessionLive, conv: Conversation, hero: Boolean,
                  onAutomation: (() -> Unit)? = null, showChips: Boolean = true, prepare: (String) -> String = { it }) {
     when {
+        live.takeover != null -> TakeoverCard(live.takeover) { vm.answerTakeover(live.takeover.requestKey, it) }
         live.permission != null -> PermissionCard(live.permission) { vm.answerPermission(live.permission.requestKey, it) }
         live.approval != null -> ApprovalCard(live.approval) { vm.approve(live.approval, it) }
         live.question != null -> QuestionCard(live.question, onSubmit = { vm.answer(live.question, it) }, onSkip = { vm.skipQuestion(live.question) })

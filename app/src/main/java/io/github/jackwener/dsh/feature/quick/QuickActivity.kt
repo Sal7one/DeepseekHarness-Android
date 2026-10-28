@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -39,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
 import io.github.jackwener.dsh.MainActivity
 import io.github.jackwener.dsh.R
+import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.data.ThemeMode
 import io.github.jackwener.dsh.core.designsystem.DIcon
 import io.github.jackwener.dsh.core.designsystem.Dsh
@@ -53,6 +55,7 @@ import io.github.jackwener.dsh.feature.conversation.ChatStream
 import io.github.jackwener.dsh.feature.conversation.ComposerSlot
 import io.github.jackwener.dsh.feature.conversation.QuickViewModel
 import io.github.jackwener.dsh.feature.conversation.rememberComposerState
+import javax.inject.Inject
 
 /**
  * The summon-anywhere panel (floating ball, QS tile, assistant gesture, share sheet, RUN_TASK):
@@ -61,8 +64,11 @@ import io.github.jackwener.dsh.feature.conversation.rememberComposerState
  */
 @AndroidEntryPoint
 class QuickActivity : ComponentActivity() {
+    @Inject lateinit var settingsRepo: SettingsRepository
+
     override fun onCreate(savedInstanceState: Bundle?) {
-        if (!intent.getBooleanExtra(EXTRA_FROM_ASSIST, false) && savedInstanceState == null) ScreenContext.captureFromAccessibility()
+        // RUN_TASK comes from another app: never attach what is on screen to its task.
+        if (!intent.getBooleanExtra(EXTRA_FROM_ASSIST, false) && intent.action != ACTION_RUN_TASK && savedInstanceState == null) ScreenContext.captureFromAccessibility()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val shared = sharedPayload(intent)
@@ -77,7 +83,16 @@ class QuickActivity : ComponentActivity() {
                 val composer = rememberComposerState(live.sessionId)
                 var useContext by remember { mutableStateOf(ScreenContext.text != null) }
                 var sentExternal by remember { mutableStateOf(false) }
-                LaunchedEffect(externalTask) { if (externalTask != null && !sentExternal) { sentExternal = true; vm.send(externalTask) } }
+                LaunchedEffect(externalTask) {
+                    if (externalTask == null || sentExternal) return@LaunchedEffect
+                    sentExternal = true
+                    // 允许其他 App 调用 (Settings → General → entry points) is off by default.
+                    if (settingsRepo.current().allowExternalApps) vm.send(externalTask)
+                    else {
+                        Toast.makeText(this@QuickActivity, getString(R.string.external_refused, callerLabel()), Toast.LENGTH_LONG).show()
+                        finish()
+                    }
+                }
                 val list = rememberLazyListState()
                 Box(Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, null) { finish() }, contentAlignment = Alignment.BottomCenter) {
                     Column(
@@ -127,6 +142,8 @@ class QuickActivity : ComponentActivity() {
         startActivity(Intent(this, MainActivity::class.java).apply { sessionId?.let { putExtra(MainActivity.EXTRA_SESSION, it) } }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         finish()
     }
+
+    private fun callerLabel(): String = referrer?.host?.let(::appLabel) ?: getString(R.string.external_unknown_app)
 
     private fun appLabel(pkg: String) = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() }.getOrDefault(pkg)
 

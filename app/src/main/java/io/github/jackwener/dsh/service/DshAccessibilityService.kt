@@ -90,19 +90,36 @@ class DshAccessibilityService : AccessibilityService() {
         if (!ok && cont.isActive) cont.resume(false)
     }
 
-    suspend fun screenshot(displayId: Int = Display.DEFAULT_DISPLAY): Bitmap? {
-        if (Build.VERSION.SDK_INT < 30) return null
+    suspend fun screenshot(displayId: Int = Display.DEFAULT_DISPLAY): Bitmap? = capture(displayId).bitmap
+
+    /** Screenshot plus the failure code (ERROR_TAKE_SCREENSHOT_SECURE_WINDOW = FLAG_SECURE on Android 14+). */
+    class Capture(val bitmap: Bitmap?, val errorCode: Int?)
+
+    suspend fun capture(displayId: Int = Display.DEFAULT_DISPLAY): Capture {
+        if (Build.VERSION.SDK_INT < 30) return Capture(null, null)
         return suspendCancellableCoroutine { cont ->
             takeScreenshot(displayId, Executors.newSingleThreadExecutor(), object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
                     val hw = Bitmap.wrapHardwareBuffer(result.hardwareBuffer, result.colorSpace)
                     val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
                     result.hardwareBuffer.close()
-                    if (cont.isActive) cont.resume(bmp)
+                    if (cont.isActive) cont.resume(Capture(bmp, null))
                 }
-                override fun onFailure(errorCode: Int) { if (cont.isActive) cont.resume(null) }
+                override fun onFailure(errorCode: Int) { if (cont.isActive) cont.resume(Capture(null, errorCode)) }
             })
         }
+    }
+
+    /**
+     * Android 13+: commit text through the accessibility service's own input connection
+     * (flagInputMethodEditor) — works in most editors without switching keyboards.
+     */
+    fun commitViaA11yInput(text: String, replace: Boolean): Boolean {
+        if (Build.VERSION.SDK_INT < 33) return false
+        val ic = inputMethod?.currentInputConnection ?: return false
+        if (replace) { ic.performContextMenuAction(android.R.id.selectAll); ic.commitText("", 1, null) }
+        ic.commitText(text, 1, null)
+        return true
     }
 
     companion object {

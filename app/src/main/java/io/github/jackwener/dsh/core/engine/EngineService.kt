@@ -33,7 +33,9 @@ class EngineService : Service() {
             .setOngoing(true)
             .setSilent(true)
             .build()
-        startForeground(Notifications.ID_ENGINE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        // Background-start denials surface in EngineManager.bind(); never crash the process here.
+        runCatching { startForeground(Notifications.ID_ENGINE, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) }
+            .onFailure { Log.w(TAG, "startForeground refused", it) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_NOT_STICKY
@@ -52,17 +54,17 @@ class EngineService : Service() {
             Os.socketpair(OsConstants.AF_UNIX, OsConstants.SOCK_STREAM, 0, nodeSide, appSide)
             // Keep the Node side open for the lifetime of the process (detached = never auto-closed).
             val bridgeFd = ParcelFileDescriptor.dup(nodeSide).detachFd().also { Os.close(nodeSide) }
-            val stderrFile = File(cacheDir, "engine.log").apply { delete() }
+            val stderrFile = EngineDiagnostics.rotateLogs(this@EngineService)
             val stderr = ParcelFileDescriptor.open(stderrFile,
                 ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_WRITE_ONLY or ParcelFileDescriptor.MODE_TRUNCATE)
 
-            env.keySet().forEach { key -> Os.setenv(key, env.getString(key) ?: "", true) }
+            EngineRuntimeEnv.apply(this@EngineService, env)
             Os.setenv("DSH_BRIDGE_FD", bridgeFd.toString(), true)
             File(env.getString("TMPDIR") ?: cacheDir.path).mkdirs()
             File(env.getString("HOME") ?: filesDir.path).mkdirs()
 
             // argv[0] ("node") is prepended by libdshengine.
-            val args = arrayOf(File(engineDir, "node_modules/@deepseek-ai/dsh/lib/bin.js").path, "--profile", "android")
+            val args = (EngineRuntimeEnv.NODE_ARGV + listOf(File(engineDir, "node_modules/@deepseek-ai/dsh/lib/bin.js").path, "--profile", "android")).toTypedArray()
             val inRead = stdin[0].detachFd()
             val outWrite = stdout[1].detachFd()
             val errWrite = stderr.detachFd()
@@ -70,6 +72,7 @@ class EngineService : Service() {
                 val code = runCatching { NodeRuntime.nativeStart(args, inRead, outWrite, errWrite) }
                     .onFailure { Log.e(TAG, "node crashed", it) }.getOrDefault(-1)
                 Log.i(TAG, "node exited with $code")
+                if (code == 0) EngineDiagnostics.markCleanExit(this@EngineService, Process.myPid())
                 stopSelf()
                 Process.killProcess(Process.myPid())
             }, "node-main", 16L * 1024 * 1024).start()

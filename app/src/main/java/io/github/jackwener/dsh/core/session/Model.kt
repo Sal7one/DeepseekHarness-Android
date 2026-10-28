@@ -45,6 +45,14 @@ data class PendingPermission(
     val what: String,
 )
 
+/** A screen step the agent cannot do itself; the call waits until the user did it by hand (继续) or stops. */
+data class PendingTakeover(
+    val requestKey: String,
+    val sessionId: String,
+    val toolName: String,
+    val reason: String,
+)
+
 data class QueuedMessage(val id: String, val text: String)
 
 /** Live state of one session: the persisted log plus everything that only exists while the app runs. */
@@ -59,6 +67,7 @@ data class SessionLive(
     val approval: PendingApproval? = null,
     val question: PendingQuestion? = null,
     val permission: PendingPermission? = null,
+    val takeover: PendingTakeover? = null,
     val waitingForUnlock: Boolean = false,
     val queue: List<QueuedMessage> = emptyList(),
     val preset: PermissionPreset = PermissionPreset.Ask,

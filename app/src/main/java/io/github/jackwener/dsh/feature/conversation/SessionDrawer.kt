@@ -59,7 +59,7 @@ import kotlinx.coroutines.delay
 
 private enum class ArchiveFilter { Hide, All, Only }
 
-/** dsh left sidebar as a phone drawer: brand, 新会话, 自动化任务, flat session list (last updated), 设置. */
+/** dsh left sidebar as a phone drawer: brand, 新会话, 自动化任务, flat session list (last updated), account footer. */
 @Composable
 fun SessionDrawer(
     sessions: List<SessionEntity>,
@@ -118,7 +118,10 @@ fun SessionDrawer(
                 SessionRow(s, status[s.id] ?: RowStatus.Idle, s.id == currentId, now, { onOpen(s.id) }, onRename, onPin, onArchive, onDelete)
             }
         }
-        PanelEntry(R.drawable.dsw_settings_outline, stringResource(R.string.settings), onSettings)
+        // dsh sidebar footer: the account launcher (avatar + name, or 更多 before sign-in) owns 设置.
+        val account = io.github.jackwener.dsh.feature.account.LocalAccount.current
+        if (account != null) Box(Modifier.padding(top = 4.dp)) { io.github.jackwener.dsh.feature.account.DrawerAccountRow(account, onSettings) }
+        else PanelEntry(R.drawable.dsw_settings_outline, stringResource(R.string.settings), onSettings)
     }
 }
 

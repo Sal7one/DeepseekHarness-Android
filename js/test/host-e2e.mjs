@@ -13,6 +13,8 @@
 // Usage: node js/test/host-e2e.mjs [engine.zip] [native-dir]
 // The API key is read from ~/.config/kevin-secrets/deepseek_api_key (never printed).
 import { spawn, execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { createServer } from 'node:http'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -22,9 +24,11 @@ const zipPath = resolve(process.argv[2] ?? join(AGENT, 'toolchains/out/engine/en
 const nativeDir = resolve(process.argv[3] ?? join(AGENT, 'toolchains/out/engine-build/host-native'))
 const keyFile = join(homedir(), '.config/kevin-secrets/deepseek_api_key')
 const root = join(AGENT, 'toolchains/tmp', `host-e2e-${Date.now()}`)
-const engineDir = join(root, 'engine')
+const engineDir = process.env.E2E_ENGINE_DIR ? resolve(process.env.E2E_ENGINE_DIR) : join(root, 'engine')
 const logFile = join(root, 'e2e.log')
 const MODEL = process.env.E2E_MODEL ?? 'deepseek-flash'
+// E2E_PHASES=A,B,C,D selects phases (default all); E2E_ENGINE_DIR reuses an extracted tree.
+const PHASES = new Set((process.env.E2E_PHASES ?? 'A,B,C,D').split(','))
 
 mkdirSync(root, { recursive: true })
 const t0 = Date.now()
@@ -35,8 +39,9 @@ const checks = []
 const check = (name, ok, info = '') => { checks.push({ name, ok }); log(ok ? 'PASS' : 'FAIL', name, info) }
 
 // ── extract the shipped artifact ─────────────────────────────────────────────
-log('extracting', zipPath)
-execFileSync('python3', ['-I', '-c', `
+if (process.env.E2E_ENGINE_DIR) log('using extracted engine', engineDir)
+else log('extracting', zipPath)
+if (!process.env.E2E_ENGINE_DIR) execFileSync('python3', ['-I', '-c', `
 import os, sys, zipfile
 z = zipfile.ZipFile(sys.argv[1])
 for i in z.infolist():
@@ -122,7 +127,8 @@ function rpcPeer(readable, writable, name, onRequest, onNotify) {
 function startEngine(env, extraFd, extraArgs = []) {
   const stdio = extraFd ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
   if (extraFd) env.DSH_BRIDGE_FD = '3'
-  const child = spawn(process.execPath, [bin, '--profile', 'android', ...extraArgs], { cwd: '/', env, stdio })
+  // Same argv as EngineService: --expose-internals replaces the require-builtin native addon (patch 02).
+  const child = spawn(process.execPath, ['--expose-internals', bin, '--profile', 'android', ...extraArgs], { cwd: '/', env, stdio })
   let stderr = ''
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', d => { stderr += d; for (const l of d.split('\n')) if (l.trim()) detail(`[dsh stderr] ${l}`) })
@@ -133,7 +139,7 @@ function startEngine(env, extraFd, extraArgs = []) {
 const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout: ${what}`)), ms))])
 
 // ── phase A: no bridge ───────────────────────────────────────────────────────
-{
+if (PHASES.has('A')) {
   log('phase A: boot without DSH_BRIDGE_FD')
   const dshHome = join(root, 'a-dsh-home'); const home = join(root, 'a-home')
   mkdirSync(home, { recursive: true })
@@ -159,7 +165,9 @@ const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => se
 }
 
 // ── phase B: fake bridge + real model ────────────────────────────────────────
-if (!existsSync(keyFile)) {
+if (!PHASES.has('B')) {
+  // skipped
+} else if (!existsSync(keyFile)) {
   check('B: DeepSeek API key available', false, keyFile)
 } else {
   log('phase B: fake capability bridge + DeepSeek', MODEL)
@@ -293,6 +301,227 @@ if (!existsSync(keyFile)) {
   }
   await withTimeout(eng.exited, 15_000, 'exit B').catch(() => eng.child.kill('SIGKILL'))
   check('B: no fatal error on stderr', !/fatal uncaught|StartupError|unhandled/i.test(eng.stderr()))
+}
+
+// ── account helpers ──────────────────────────────────────────────────────────
+const httpGet = (url) => new Promise((resolve, reject) => {
+  import('node:http').then(({ get }) => {
+    get(url, res => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', d => { body += d })
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }))
+    }).on('error', reject)
+  })
+})
+const waitFor = async (pred, ms, what) => {
+  const end = Date.now() + ms
+  while (Date.now() < end) { const v = pred(); if (v) return v; await new Promise(r => setTimeout(r, 50)) }
+  throw new Error(`timeout waiting for ${what}`)
+}
+
+/** Fake Platform implementing the five endpoints dsh's account provider calls (protocol.ts / details.ts). */
+function mockPlatform() {
+  const st = { inits: [], exchanges: [], cancels: [], logouts: [], current: 0, failExchange: false, expire: false, headers: [] }
+  const ok = data => JSON.stringify({ code: 0, msg: '', data: { biz_code: 0, biz_msg: '', biz_data: data } })
+  const user = { id: 'u-e2e-1', email: 'e2e***@example.com', mobile_number: '138****0000', id_profile: { name: 'E2E Tester', picture: 'https://cdn.example.com/a.png' } }
+  const server = createServer((req, res) => {
+    let raw = ''
+    req.on('data', d => { raw += d })
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://x')
+      const body = raw ? JSON.parse(raw) : undefined
+      st.headers.push({ path: url.pathname, platform: req.headers['x-client-platform'], locale: req.headers['x-client-locale'], version: req.headers['x-client-version'] })
+      const send = (status, text) => { res.writeHead(status, { 'content-type': 'application/json' }).end(text) }
+      const origin = `http://127.0.0.1:${server.address().port}`
+      switch (url.pathname) {
+        case '/auth-api/v0/dsh/auth_init':
+          st.inits.push(body)
+          return send(200, ok({ authorize_url: `${origin}/dsh/authorize?authorize_id=az-${st.inits.length}`, authorize_id: `az-${st.inits.length}`, expires_in: 600 }))
+        case '/auth-api/v0/dsh/auth_exchange': {
+          st.exchanges.push(body)
+          const init = st.inits.at(-1)
+          const pkce = createHash('sha256').update(body.code_verifier).digest('base64url') === init?.code_challenge
+          if (st.failExchange || !pkce || body.redirect_uri !== init.redirect_uri) return send(200, JSON.stringify({ code: 0, data: { biz_code: 1, biz_msg: 'bad code', biz_data: null } }))
+          return send(200, ok({ token: 'tok-e2e-account', authorized_url: `${origin}/dsh/authorized?x=1`, user }))
+        }
+        case '/auth-api/v0/dsh/auth_cancel': st.cancels.push(body); return send(200, ok(null))
+        case '/auth-api/v0/users/logout': st.logouts.push(req.headers['x-dsh-auth-token']); return send(200, ok(null))
+        case '/auth-api/v0/users/current':
+          st.current += 1
+          if (st.expire) return send(401, '{}')
+          return send(200, ok(user))
+        case '/api/v0/users/get_user_summary':
+          if (st.expire) return send(401, '{}')
+          return send(200, ok({ normal_wallets: [{ currency: 'CNY', balance: '12345.678' }], bonus_wallets: [{ currency: 'CNY', balance: '0E-16' }] }))
+        default: return send(404, '{}')
+      }
+    })
+  })
+  return new Promise(r => server.listen(0, '127.0.0.1', () => r({ server, st, origin: `http://127.0.0.1:${server.address().port}` })))
+}
+
+/** Boot the engine with no API key, an SDK peer recording account notifications. */
+async function accountEngine(tag, extraArgs = []) {
+  const dshHome = join(root, `${tag}-dsh-home`); const home = join(root, `${tag}-home`)
+  mkdirSync(home, { recursive: true })
+  const env = baseEnv(dshHome, home)
+  env.DSH_ANDROID_LOCALE = 'zh-CN'
+  env.DSH_ANDROID_PACKAGE = 'io.github.jackwener.dsh'
+  const eng = startEngine(env, false, extraArgs)
+  const notes = []
+  const sdk = rpcPeer(eng.child.stdout, eng.child.stdin, `sdk-${tag}`, () => ({ outcome: 'rejected' }), (method, params) => {
+    if (method.startsWith('account.')) { notes.push({ method, params }); detail(`[${tag}] ${method} ${JSON.stringify(params).slice(0, 300)}`) }
+  })
+  return { eng, sdk, notes, home, dshHome }
+}
+const client = { version: '0.1.0', locale: 'zh-CN', timezoneOffsetSeconds: 28800 }
+const phaseOf = notes => notes.filter(n => n.method === 'account.changed').at(-1)?.params?.view?.attempt?.phase
+
+// ── phase C: account login against a fake Platform (full PKCE round trip) ────
+if (PHASES.has('C')) {
+  log('phase C: account login, fake Platform, no API key')
+  const mock = await mockPlatform()
+  const overlay = join(root, 'account-overlay.yml')
+  writeFileSync(overlay, [
+    '- id: deepseek-account',
+    '  config:',
+    `    platformOrigin: ${mock.origin}`,
+    '    allowLoopbackHttp: true',
+    // A row patch replaces the whole config; schemastery resolves an absent
+    // `desktopPlatform` to undefined (not its declared null default), which the
+    // provider reports as desktop-mac, so keep dsh-base's explicit null.
+    '    desktopPlatform: null',
+    '',
+  ].join('\n'))
+  const { eng, sdk, notes, home } = await accountEngine('c', ['--patch', overlay])
+  try {
+    const s0 = await withTimeout(sdk.request('account/state', {}), 60_000, 'account/state')
+    check('C: account/state answers before initialize (engine up without any API key)', s0?.status === 'signed-out' && s0.links?.topUpUrl === `${mock.origin}/top_up`, JSON.stringify(s0))
+    const init = await sdk.request('initialize', { cwd: home, provider: 'deepseek-official', model: MODEL, approvalRequests: true, capabilities: { userQuestions: true } })
+    check('C: initialize without API key succeeds (deepseek-official)', init?.serverInfo?.name === 'deepseek-harness-sdk-runtime')
+
+    // 1. failed exchange → failed phase + local failure page
+    mock.st.failExchange = true
+    let v = await sdk.request('account/sign-in/start', { client })
+    const waiting1 = await waitFor(() => notes.findLast(n => n.params?.view?.attempt?.phase === 'waiting-browser'), 15_000, 'waiting-browser 1')
+    const auth1 = waiting1.params.view.attempt.authorizeUrl
+    const redirect1 = mock.st.inits.at(-1)?.redirect_uri
+    check('C: sign-in start → authorize URL + loopback redirect_uri', v?.attempt?.phase === 'initializing' && auth1?.startsWith(`${mock.origin}/dsh/authorize`) && /^http:\/\/127\.0\.0\.1:\d+\/oauth\/callback$/.test(redirect1 ?? ''), `${auth1} redirect_uri=${redirect1}`)
+    check('C: auth_init carries PKCE S256 + web login_source + zh_CN locale', mock.st.inits.at(-1)?.code_challenge_method === 'S256' && mock.st.inits.at(-1)?.login_source === 'web' && mock.st.inits.at(-1)?.locale === 'zh_CN')
+    const bad = await httpGet(`${redirect1}?code=c1&state=wrong`)
+    check('C: callback with a wrong state is rejected (400) and the attempt keeps waiting', bad.status === 400 && phaseOf(notes) === 'waiting-browser')
+    const state1 = mock.st.inits.at(-1).state
+    const cb1 = await httpGet(`${redirect1}?code=c1&state=${encodeURIComponent(state1)}`)
+    await waitFor(() => phaseOf(notes) === 'failed', 15_000, 'failed phase')
+    check('C: rejected exchange → phase failed; Custom Tab gets the local failure page with the app link',
+      cb1.status === 200 && cb1.body.includes('登录失败') && cb1.body.includes('intent://account/login?result=failed#Intent;scheme=dsh-android;package=io.github.jackwener.dsh;end'),
+      `status=${cb1.status} errorCode=${notes.findLast(n => n.params?.view?.attempt?.errorCode)?.params.view.attempt.errorCode}`)
+    check('C: account.callback notification reports the failure', notes.some(n => n.method === 'account.callback' && n.params?.result === 'failed'))
+
+    // 2. successful round trip
+    mock.st.failExchange = false
+    const before = notes.length
+    await sdk.request('account/sign-in/start', { client })
+    await waitFor(() => notes.slice(before).find(n => n.params?.view?.attempt?.phase === 'waiting-browser'), 15_000, 'waiting-browser 2')
+    const init2 = mock.st.inits.at(-1)
+    const cb2 = await httpGet(`${init2.redirect_uri}?code=c2&state=${encodeURIComponent(init2.state)}`)
+    await waitFor(() => notes.slice(before).find(n => n.params?.view?.status === 'credential-stored' && n.params.view.attempt?.phase === 'succeeded'), 15_000, 'succeeded')
+    check('C: valid callback → PKCE exchange → grant stored (credential-stored, phase succeeded)',
+      mock.st.exchanges.at(-1)?.code === 'c2' && phaseOf(notes) === 'succeeded', `exchange redirect_uri matches=${mock.st.exchanges.at(-1)?.redirect_uri === init2.redirect_uri}`)
+    check('C: success page replaces Platform completion and opens dsh-android://account/login?result=ok',
+      cb2.status === 200 && cb2.body.includes('登录成功') && cb2.body.includes('result=ok#Intent;scheme=dsh-android'))
+    const d = await sdk.request('account/details', { client })
+    check('C: account/details → profile (name/contact/avatar) and balances', d?.profile?.status === 'ready' && d.profile.value.name === 'E2E Tester'
+      && d.profile.value.contact === '138****0000' && d.profile.value.avatarUrl === 'https://cdn.example.com/a.png'
+      && d.balance?.value?.[0]?.balance === '12345.678' && d.balance.bonusWallets?.[0]?.balance === '0E-16', JSON.stringify(d).slice(0, 200))
+    const hdr = mock.st.headers.findLast(h => h.path === '/api/v0/users/get_user_summary')
+    check('C: Platform client headers derived from the app metadata', hdr?.platform === 'web' && hdr.locale === 'zh_CN' && hdr.version === '0.1.0', JSON.stringify(hdr))
+    const running = await sdk.request('account/tasks/running', {})
+    check('C: account/tasks/running', running?.running === false)
+
+    // 3. engine re-initialized onto the account route (what the app does after login without a key)
+    let reinit
+    try { reinit = await sdk.request('initialize', { cwd: home, provider: 'deepseek-account', model: MODEL, approvalRequests: true, capabilities: { userQuestions: true } }) } catch (e) { reinit = e }
+    check('C: re-initialize switches the SDK route to deepseek-account', reinit?.serverInfo !== undefined, reinit?.message ?? '')
+    // A loopback-issued (development) grant never authenticates the production API, so the
+    // model request is refused exactly like a signed-out account → model-sign-in-required.
+    const sid = `acct-${Date.now()}`
+    await sdk.request('session/prompt', { sessionId: sid, contentBlocks: [{ type: 'text', text: 'hi' }] })
+    await withTimeout(sdk.request('session/wait', { sessionId: sid }), 60_000, 'account prompt').catch(e => detail(`wait: ${e.message}`))
+    await waitFor(() => notes.some(n => n.method === 'account.model-sign-in-required'), 15_000, 'model-sign-in-required').catch(() => {})
+    check('C: account model request without a usable grant → account.model-sign-in-required', notes.some(n => n.method === 'account.model-sign-in-required'))
+
+    // 4. Platform rejects the grant (HTTP 401) → session expired + signed out
+    mock.st.expire = true
+    await sdk.request('account/details', { client })
+    await waitFor(() => notes.some(n => n.method === 'account.session-expired'), 10_000, 'session-expired').catch(() => {})
+    const s4 = await sdk.request('account/state', {})
+    check('C: HTTP 401 → account.session-expired + account.signed-out, grant removed',
+      notes.some(n => n.method === 'account.session-expired') && notes.some(n => n.method === 'account.signed-out') && s4.status === 'signed-out')
+
+    // 5. sign in again, then explicit sign-out revokes remotely
+    mock.st.expire = false
+    const before5 = notes.length
+    await sdk.request('account/sign-in/start', { client })
+    await waitFor(() => notes.slice(before5).find(n => n.params?.view?.attempt?.phase === 'waiting-browser'), 15_000, 'waiting-browser 5')
+    const init5 = mock.st.inits.at(-1)
+    await httpGet(`${init5.redirect_uri}?code=c5&state=${encodeURIComponent(init5.state)}`)
+    await waitFor(() => notes.slice(before5).find(n => n.params?.view?.status === 'credential-stored'), 15_000, 'credential-stored 5')
+    const signedOutBefore = notes.filter(n => n.method === 'account.signed-out').length
+    const out = await sdk.request('account/sign-out', { client })
+    await waitFor(() => mock.st.logouts.length > 0, 10_000, 'logout').catch(() => {})
+    check('C: sign-out → signed-out view + notification; Platform logout called with the old token',
+      out?.status === 'signed-out' && notes.filter(n => n.method === 'account.signed-out').length > signedOutBefore && mock.st.logouts.at(-1) === 'tok-e2e-account')
+
+    // 6. cancel while waiting for the browser → auth_cancel with the verifier
+    const before6 = notes.length
+    await sdk.request('account/sign-in/start', { client })
+    const w6 = await waitFor(() => notes.slice(before6).find(n => n.params?.view?.attempt?.phase === 'waiting-browser'), 15_000, 'waiting-browser 6')
+    const c6 = await sdk.request('account/sign-in/cancel', { attemptId: w6.params.view.attempt.id })
+    await waitFor(() => mock.st.cancels.length > 0, 10_000, 'auth_cancel').catch(() => {})
+    const late = await httpGet(`${mock.st.inits.at(-1).redirect_uri}?code=late&state=${encodeURIComponent(mock.st.inits.at(-1).state)}`)
+    check('C: cancel → phase cancelled, Platform auth_cancel, late callback cannot sign in',
+      c6?.attempt?.phase === 'cancelled' && mock.st.cancels.at(-1)?.authorize_id === `az-${mock.st.inits.length}` && late.status !== 302 && (await sdk.request('account/state', {})).status === 'signed-out', `late=${late.status}`)
+    await sdk.request('shutdown', {}).catch(() => {})
+  } catch (error) {
+    check('C: run completed', false, error.stack ?? error.message)
+  }
+  await withTimeout(eng.exited, 15_000, 'exit C').catch(() => eng.child.kill('SIGKILL'))
+  mock.server.close()
+  check('C: no fatal error on stderr', !/fatal uncaught|StartupError|unhandled/i.test(eng.stderr()))
+}
+
+// ── phase D: real platform.deepseek.com, up to the authorize URL ─────────────
+// Completing a real login needs a human in the browser; this phase verifies the
+// shipped configuration reaches Platform, gets a real authorization page, rejects
+// a forged callback and cancels cleanly.
+if (PHASES.has('D')) {
+  log('phase D: account login against https://platform.deepseek.com (no API key)')
+  const { eng, sdk, notes } = await accountEngine('d')
+  try {
+    const s0 = await withTimeout(sdk.request('account/state', {}), 60_000, 'account/state D')
+    check('D: signed out, links on platform.deepseek.com', s0?.status === 'signed-out' && s0.links?.usageUrl === 'https://platform.deepseek.com/usage', JSON.stringify(s0.links))
+    await sdk.request('account/sign-in/start', { client })
+    const w = await waitFor(() => notes.find(n => ['waiting-browser', 'failed'].includes(n.params?.view?.attempt?.phase)), 30_000, 'auth_init')
+    const a = w.params.view.attempt
+    const u = a.authorizeUrl ? new URL(a.authorizeUrl) : undefined
+    check('D: real auth_init → authorize URL on https://platform.deepseek.com/dsh/authorize', u?.origin === 'https://platform.deepseek.com' && u.pathname === '/dsh/authorize',
+      u ? `${u.origin}${u.pathname} params=[${[...u.searchParams.keys()].join(',')}] expiresIn≈${Math.round((a.expiresAt - Date.now()) / 1000)}s` : `phase=${a.phase} error=${a.errorCode}`)
+    const origin = /login callback server on (http:\/\/127\.0\.0\.1:\d+)/.exec(eng.stderr())?.[1]
+    const redirect = origin && `${origin}/oauth/callback`
+    if (redirect) {
+      const forged = await httpGet(`${redirect}?code=forged&state=forged`)
+      const missing = await httpGet(`${redirect}?state=x`)
+      check('D: forged / incomplete callbacks rejected (400), attempt still waiting', forged.status === 400 && missing.status === 400 && phaseOf(notes) === 'waiting-browser')
+    } else check('D: loopback callback server logged its origin', false)
+    const c = await sdk.request('account/sign-in/cancel', { attemptId: a.id })
+    check('D: cancel → phase cancelled, still signed out', c?.attempt?.phase === 'cancelled' && c.status === 'signed-out')
+    await sdk.request('shutdown', {}).catch(() => {})
+  } catch (error) {
+    check('D: run completed', false, error.stack ?? error.message)
+  }
+  await withTimeout(eng.exited, 15_000, 'exit D').catch(() => eng.child.kill('SIGKILL'))
 }
 
 const failed = checks.filter(c => !c.ok)

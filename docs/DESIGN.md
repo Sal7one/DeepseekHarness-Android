@@ -68,10 +68,10 @@
 | 设备能力放在 `:main` 进程 | 无障碍服务和通知监听服务由系统绑定到 App 的默认进程，能力只能在这里执行 |
 | Node 访问设备能力：N-API → JNI → AIDL | 不开任何网络端口，没有可被其他 App 连接的攻击面 |
 | 不 fork dsh | 锁定版本，用 pnpm patch 加独立插件维护（补丁清单见 v1 §1.3 和附录 A） |
-| 不依赖 Google Play 服务 | 国产手机没有 GMS；地理围栏等能力用系统 API 实现 |
+| 不依赖 Google Play 服务 | 国产手机没有 GMS；所有能力都有系统 API 实现。唯一例外：有 GMS 时地理围栏优先用 Play 服务（后台启动豁免、更省电），没有时自动退回系统 API |
 
 **命令行**：直接用系统自带的 `/system/bin/sh` 和 toybox，再加上内置的 `librg.so`（ripgrep）。dsh 的 shell 路径通过补丁改指向 `/system/bin/sh`。dsh 的持久 shell 依赖伪终端，所以需要 node-pty【源码】。
-**需要编译的原生组件**（共 4 个，附录 A 实测确认）：`node-addon-system`（flock）、`node-addon-require-builtin`、`node-pty`、`android-bridge`（新写）。
+**需要编译的原生组件**（附录 A 实测确认）：`node-addon-system`（flock）、`node-pty`、`android-bridge`（新写）。`node-addon-require-builtin` 已去掉：dsh 只用它取 Node **内部**模块（`internal/modules/esm/loader` 等，`process.getBuiltinModule` 拿不到），现在引擎以 `--expose-internals` 启动（argv，NODE_OPTIONS 不允许该参数），js 补丁 02 让它直接 `require()`，不再加载靠反汇编探测偏移的原生插件。
 **targetSdk 36，minSdk 29**：去掉工具链之后，不再需要用 targetSdk 28 来绕开“禁止执行数据目录文件”的限制。所有可执行文件都放在 nativeLibraryDir 里。
 
 ---
@@ -82,7 +82,11 @@
 2. EngineService 在后台线程里调用 JNI 的 `node::Start`，参数是 `dsh --profile android`。stdio 换成管道，转发给 `:main`。
 3. 冷启动期间显示进度条，目标是 ≤ 4 秒（验收项 AC1）。
 4. **空闲 5 分钟**（没有运行中的会话、没有即将到点的定时任务）→ 调用 `shutdown` → 结束进程。
-5. 引擎崩溃 → `:main` 的看门狗检测到后重新拉起，并对正在运行的会话调用 `session/resume`。dsh 会自动修复中断的那一轮对话【源码】。
+5. 引擎崩溃 → `:main` 检测到通道关闭后按 1/2/4 秒退避重启（`RestartPolicy`）；10 分钟内连续 3 次崩溃就熔断：不再自动重启，自动化启动直接失败，Doctor 提示；稳定运行 60 秒后复位。`session/resume` 只修复中断的那一轮（关闭悬空的工具调用）而不会继续【源码】，所以每个中断的根会话在重启后由 App 自动 resume 并发一条“引擎重启，检查已完成的步骤后继续”的续跑提示；每轮最多自动续跑 1 次，再次中断或熔断时显示带“继续”按钮的错误。两个进程都被杀时，下次启动把残留的“运行中”会话标为中断并给“继续”。
+6. 运行中的轮次期间 `:main` 持有 PARTIAL_WAKE_LOCK（10 分钟超时，随会话事件续期；等待审批、回答、解锁时不持有），没有运行中的会话就释放（`TurnWakeLock`）。
+7. 崩溃现场：Node stderr 写 `files/logs/engine.log`，每次启动轮转为 `engine.log.1..3`；`:main` 启动及每次异常退出后读取 `:engine` 的 ApplicationExitInfo，原生崩溃的 tombstone（protobuf）原样存为 `tombstone-*.pb`，可读字符串和退出原因写入 `exit-*.txt`（保留 3 份），在 Doctor / 关于页显示。debug 包开启 GWP-ASan（`gwpAsanMode="always"`）。
+8. 运行环境统一在 `EngineRuntimeEnv` 组装：`NODE_EXTRA_CA_CERTS` 指向启动时从 `AndroidCAStore`（系统 CA 去掉用户停用的 + 用户安装的 CA）导出的 PEM（摘要不变就不重写）；`NODE_COMPILE_CACHE` 放在 cacheDir；`NODE_OPTIONS` 只在这里合并。
+9. 从后台拉起前台服务被拒（`ForegroundServiceStartNotAllowedException`，通常是电池优化被重新打开）时，自动化降级为高优先级通知“点此执行：<规则名>”，点击即在前台启动并执行。
 
 ### 3.2 dsh 定制 profile `android`
 - 在 `dsh-base` 上叠加以下内容：
@@ -112,7 +116,7 @@
 | App | `app_list` `app_info` | 读 | 否 | PackageManager |
 | | `app_launch` `app_open_link` `app_send_intent` `share_to_app` | 写 | **是** | Intent |
 | 屏幕 | `screen_read`（界面元素树） `screen_capture` | 读 | 是 | 无障碍 / 截图 |
-| | `screen_tap` `screen_swipe` `screen_type` `screen_back` `screen_home` `screen_scroll` | 写 | 是 | 无障碍；有 Shizuku 时改用 `input` 命令 |
+| | `screen_tap` `screen_swipe` `screen_type` `screen_back` `screen_home` `screen_scroll` | 写 | 是 | 无障碍；有 Shizuku 时改用 `input` 命令。`screen_type` 逐级回退并回读校验：SET_TEXT → 无障碍输入连接（Android 13+）→ 自带“DSH 输入法” → Shizuku `input text`（ASCII）/ `ime set` 切到 DSH 输入法再切回（中文）→ 剪贴板粘贴 |
 | 系统 | `device_status`（电量、网络、存储、位置） | 读 | 否 | 系统 API |
 | | `sound_mode` `volume_set` `dnd_set` `brightness_set` `alarm_set` `flashlight` | 写 | 否 | AudioManager、NotificationManager、Settings |
 | | `wifi_toggle` `bluetooth_toggle` `setting_put` | 写 | 否 | **仅 Shizuku** |
@@ -129,6 +133,9 @@
 
 ### 4.2 优先级规则
 **系统 API > Intent 或深链 > Shizuku 命令 > 无障碍模拟点击**。插件的 system prompt 和工具描述里会写明这条规则，引导模型优先选不需要解锁的路径。
+
+### 4.2.1 人工接管
+截图被拒（Android 14+ 返回 SECURE_WINDOW）或截图几乎全黑（`FLAG_SECURE` 页面）时，`screen_capture` 不再返回黑图：有人值守的会话暂停这次调用，显示“请你来操作”卡片和通知，用户亲自完成后点“继续”，工具返回“用户已手动完成”；点“停止”或无人值守会话直接返回 `secure_screen` 错误。
 
 ### 4.3 锁屏
 - 需要解锁的工具在锁屏时被调用 → 不执行。任务进入“等待解锁”状态，推送通知“解锁后继续”。`:main` 监听到解锁事件（`ACTION_USER_PRESENT`，运行时注册）后，自动对该会话发送“已解锁，请继续”。
@@ -149,7 +156,7 @@
 | 屏幕亮灭、解锁 | 运行时注册的广播，在常驻监听服务里处理 |
 | 收到通知（按 App 和关键词） | NotificationListenerService（由系统常驻绑定）|
 | 某个 App 被打开 | AccessibilityService 的窗口变化事件（已开无障碍时可用）|
-| 进入或离开某个区域 | `LocationManager.addProximityAlert(PendingIntent)`（不依赖 GMS），需要后台定位权限 |
+| 进入或离开某个区域 | 有 Play 服务时用 `GeofencingClient`（其转换广播在后台启动前台服务的豁免列表里）；没有 GMS 时退回 `LocationManager.addProximityAlert`（不在豁免列表、后台定位每小时只更新几次，可能延迟数分钟，靠“点此执行”兜底；Doctor 标注）。都需要后台定位权限 |
 
 - **常驻监听服务**：只有存在需要运行时广播的规则时才启动。它是一个很轻量的前台服务，带一条常驻通知“正在监听 N 条规则”，不加载 Node，所以几乎不耗电。
 - **附加条件**：电量范围、时间段、星期几、当前前台 App、是否锁屏。
@@ -169,7 +176,8 @@
 3. **hardline 禁止清单**：在 plugin-guard 里实现，任何授权都绕不过去。
 4. **无人值守**：规则和定时任务的会话只能使用规则白名单内的能力，超出范围的调用返回 `tool_not_authorized`，同时推送通知。
 5. **预算**：每个会话和每天各设 token 上限与费用上限，超出前拒绝执行。数据来源是 dsh 的 token-meter 事件。
-6. **密钥**：API key 用 Android Keystore 加密保存，不写日志，也不进系统备份（`dataExtractionRules` 排除）。
+6. **外部调用**：`RUN_TASK`（其他 App 让 DSH 执行一句指令）受“允许其他 App 调用”开关控制，默认关闭；关闭时拒绝并提示去哪里开启。外部任务不附带当前屏幕内容。
+7. **密钥**：API key 用 Android Keystore 加密保存，不写日志，也不进系统备份（`dataExtractionRules` 排除）。
 
 ---
 
@@ -237,7 +245,10 @@
 - 引擎能否启动，以及启动耗时；
 - 模型连通性和 key 是否有效；
 - 存储空间；
-- 规则监听服务是否在运行。
+- 规则监听服务是否在运行（被系统拒绝后台启动时说明原因）；
+- 有自动化时，“不受电池优化限制”是**必需项**（红色），因为没有它后台无法启动引擎；
+- 地点触发用的是 Play 服务还是系统 API；
+- 引擎崩溃熔断状态、上次 `:engine` 异常退出记录（含 tombstone 摘要）。
 
 ---
 

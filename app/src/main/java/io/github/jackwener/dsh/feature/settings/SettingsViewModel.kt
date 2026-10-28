@@ -44,6 +44,7 @@ class SettingsViewModel @Inject constructor(
     private val secrets: SecretStore,
     private val engine: EngineManager,
     val shizuku: ShizukuShell,
+    val account: io.github.jackwener.dsh.core.account.AccountRepository,
     usage: UsageDao,
 ) : ViewModel() {
     val settings: StateFlow<DshSettings> = repo.settings.stateIn(viewModelScope, SharingStarted.Eagerly, DshSettings())
@@ -64,8 +65,10 @@ class SettingsViewModel @Inject constructor(
     fun setWorkDetails(w: WorkDetails) = viewModelScope.launch { repo.setWorkDetails(w) }
     fun setBusySend(b: BusySend) = viewModelScope.launch { repo.setBusySend(b) }
     fun setDefaultPreset(p: PermissionPreset) = viewModelScope.launch { repo.setDefaultPreset(p) }
+    fun setAllowExternalApps(on: Boolean) = viewModelScope.launch { repo.setAllowExternalApps(on) }
     fun restartEngine() = viewModelScope.launch { engine.stop() }
-    val engineLog: String? get() = File(context.cacheDir, "engine.log").takeIf { it.exists() && it.length() > 0 }?.readText()?.takeLast(4000)
+    val engineLog: String? get() = io.github.jackwener.dsh.core.engine.EngineDiagnostics.logTail(context, 4000)
+    val lastEngineExit: String? get() = ReliabilityDoctor.lastExitText(context)
     /** Bumped on resume so permission rows re-check their status. */
     val permissionTick = MutableStateFlow(0)
     fun setBall(on: Boolean) = viewModelScope.launch { repo.setFloatingBall(on); FloatingBallService.setEnabled(context, on) }
@@ -102,7 +105,12 @@ class SettingsViewModel @Inject constructor(
                    !shizuku.running -> if (zh) "已安装但未启动" else "Installed, not running"
                    !shizuku.granted -> if (zh) "未授权" else "Not authorized"
                    else -> if (zh) "可用" else "Ready" })
-        checks += DoctorCheck("API key", hasKey, maskedKey ?: "-")
+        val signedIn = account.signedIn
+        checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn, when {
+            hasKey -> "API key " + (maskedKey ?: "")
+            signedIn -> if (zh) "DeepSeek 账号" else "DeepSeek account"
+            else -> if (zh) "未登录，也未设置 API Key" else "Not signed in, no API key"
+        })
         val engineDetail = when (val s = engine.state.value) {
             EngineState.Ready -> (if (zh) "运行中，启动用时 " else "Running, started in ") + "${engine.startupMillis} ms"
             is EngineState.Failed -> s.message
@@ -111,6 +119,7 @@ class SettingsViewModel @Inject constructor(
         checks += DoctorCheck(if (zh) "Agent 引擎" else "Agent engine", engine.state.value !is EngineState.Failed, engineDetail)
         checks += DoctorCheck(if (zh) "存储空间" else "Storage", (context.filesDir.usableSpace > 500_000_000L),
             "${context.filesDir.usableSpace / 1_000_000} MB free")
+        checks += withContext(Dispatchers.IO) { ReliabilityDoctor.checks(context, zh) }
         doctor.value = checks
     }
 

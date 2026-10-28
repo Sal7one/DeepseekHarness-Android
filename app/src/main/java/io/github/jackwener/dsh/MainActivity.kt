@@ -29,7 +29,15 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.github.jackwener.dsh.core.account.AccountRepository
 import io.github.jackwener.dsh.core.data.SecretStore
+import io.github.jackwener.dsh.feature.account.AccountToastHost
+import io.github.jackwener.dsh.feature.account.LocalAccount
+import io.github.jackwener.dsh.feature.account.SignInDialog
+import io.github.jackwener.dsh.feature.account.openPlatform
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.data.ThemeMode
 import io.github.jackwener.dsh.core.designsystem.Dsh
@@ -38,7 +46,7 @@ import io.github.jackwener.dsh.feature.automation.AutomationScreen
 import io.github.jackwener.dsh.feature.automation.RuleDetailScreen
 import io.github.jackwener.dsh.feature.conversation.HomeScreen
 import io.github.jackwener.dsh.feature.conversation.HomeViewModel
-import io.github.jackwener.dsh.feature.settings.KeyOnboarding
+import io.github.jackwener.dsh.feature.settings.Onboarding
 import io.github.jackwener.dsh.feature.settings.NotificationAppsScreen
 import io.github.jackwener.dsh.feature.settings.SettingsScreen
 import io.github.jackwener.dsh.feature.settings.SettingsSection
@@ -48,31 +56,50 @@ import kotlinx.coroutines.flow.stateIn
 import javax.inject.Inject
 
 @HiltViewModel
-class MainViewModel @Inject constructor(settings: SettingsRepository, secrets: SecretStore) : ViewModel() {
+class MainViewModel @Inject constructor(settings: SettingsRepository, secrets: SecretStore, account: AccountRepository) : ViewModel() {
     /** null = still loading (keeps the splash up). */
     val theme = settings.settings.map { it.theme }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val hasKey = secrets.read() != null
+    /** A model credential exists: an API key, or a DeepSeek account login (cached from the engine). */
+    val hasCredentials = secrets.read() != null || account.signedIn
 }
 
 /**
- * The app opens straight into the conversation (dsh home). Onboarding is only the API key when
- * it is missing; everything else (Android permissions) is asked just in time from the composer slot.
+ * The app opens straight into the conversation (dsh home). Onboarding is only the credential
+ * choice when there is none (dsh: 登录 DeepSeek 账号 / 使用 API Key); everything else (Android
+ * permissions) is asked just in time from the composer slot.
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject lateinit var account: AccountRepository
     private var pendingSession by mutableStateOf<String?>(null)
+    /** The sign-in dialog's 添加 API Key while onboarding expands the key card in place. */
+    private var onboardingKey by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val splash = installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         pendingSession = intent.getStringExtra(EXTRA_SESSION)
+        handleAppLink(intent)
         setContent {
             val vm: MainViewModel = hiltViewModel()
             val theme by vm.theme.collectAsStateWithLifecycle()
             splash.setKeepOnScreenCondition { theme == null }
             DshTheme(theme ?: ThemeMode.System) {
-                Box(Modifier.fillMaxSize().background(Dsh.colors.bgBase)) { if (theme != null) AppNav(vm.hasKey) }
+                val c = Dsh.colors
+                LaunchedEffect(c.isDark) { account.darkTheme = c.isDark }
+                // Platform's authorization page opens in a Custom Tab on top of this task.
+                LaunchedEffect(c.isDark) {
+                    repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        account.browserRequests.collect { url -> openPlatform(this@MainActivity, url, c.isDark, c.bgBase) }
+                    }
+                }
+                CompositionLocalProvider(LocalAccount provides account) {
+                    Box(Modifier.fillMaxSize().background(c.bgBase)) {
+                        if (theme != null) AppNav(vm.hasCredentials)
+                        AccountToastHost(account)
+                    }
+                }
             }
         }
     }
@@ -80,18 +107,33 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         pendingSession = intent.getStringExtra(EXTRA_SESSION)
+        handleAppLink(intent)
+    }
+
+    /** `dsh-android://account/login?result=…` from the sign-in completion page in the Custom Tab. */
+    private fun handleAppLink(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme == "dsh-android" && data.host == "account") account.onReturnedFromBrowser()
     }
 
     @Composable
-    private fun AppNav(hasKey: Boolean) {
+    private fun AppNav(hasCredentials: Boolean) {
         val nav = rememberNavController()
         val home: HomeViewModel = hiltViewModel()
+        val accountState by account.state.collectAsStateWithLifecycle()
         LaunchedEffect(pendingSession) {
             pendingSession?.let { id -> home.open(id); nav.popBackStack("home", inclusive = false); pendingSession = null }
         }
-        val start = remember { if (hasKey) "home" else "key" }
+        val start = remember { if (hasCredentials) "home" else "onboarding" }
+        if (accountState.loginVisible) SignInDialog(account, onUseApiKey = {
+            if (nav.currentDestination?.route == "onboarding") onboardingKey = true
+            else nav.navigate("settings?section=Model")
+        })
         NavHost(nav, startDestination = start, enterTransition = { fadeIn() }, exitTransition = { fadeOut() }) {
-            composable("key") { KeyOnboarding(onDone = { nav.navigate("home") { popUpTo("key") { inclusive = true } } }) }
+            composable("onboarding") {
+                Onboarding(showKey = onboardingKey, onShowKey = { onboardingKey = it },
+                    onDone = { nav.navigate("home") { popUpTo("onboarding") { inclusive = true } } })
+            }
             composable("home") {
                 HomeScreen(home,
                     onSettings = { section -> nav.navigate("settings?section=${section ?: ""}") },

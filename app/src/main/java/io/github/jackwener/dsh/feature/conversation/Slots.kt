@@ -57,6 +57,7 @@ import io.github.jackwener.dsh.core.session.ApprovalOutcome
 import io.github.jackwener.dsh.core.session.Block
 import io.github.jackwener.dsh.core.session.PendingApproval
 import io.github.jackwener.dsh.core.session.PendingPermission
+import io.github.jackwener.dsh.core.session.PendingTakeover
 import io.github.jackwener.dsh.core.session.PendingQuestion
 import io.github.jackwener.dsh.core.session.ToolState
 import io.github.jackwener.dsh.core.session.parseArgs
@@ -147,6 +148,20 @@ fun PermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
             }
         }, variant = if (launched) BtnVariant.Outline else BtnVariant.Primary, enabled = !answered)
         if (launched || item == null) DButton(stringResource(R.string.continue_), { answered = true; onAnswer(true) }, enabled = !answered)
+    }
+}
+
+/** Manual takeover (AutoGLM-style): 请你来操作，完成后点继续 — the screen step waits for the user. */
+@Composable
+fun TakeoverCard(t: PendingTakeover, onAnswer: (Boolean) -> Unit) {
+    val c = Dsh.colors
+    var answered by remember(t.requestKey) { mutableStateOf(false) }
+    AttentionCard(stringResource(R.string.takeover_title), answered, body = {
+        Text(stringResource(R.string.takeover_body), style = DshType.s14m.copy(lineHeight = DshType.base16.lineHeight), color = c.labelPrimary)
+        Text(t.reason, style = DshType.xs13, color = c.labelSecondary)
+    }) {
+        DButton(stringResource(R.string.takeover_stop), { answered = true; onAnswer(false) }, variant = BtnVariant.Outline, enabled = !answered)
+        DButton(stringResource(R.string.continue_), { answered = true; onAnswer(true) }, enabled = !answered)
     }
 }
 

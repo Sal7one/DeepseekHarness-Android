@@ -76,3 +76,16 @@
         # Tools that mutate state outside the device bridge and therefore ask
         # for approval on every call (no OS sandbox on Android).
         askTools: [bash, write, edit]
+
+    # DeepSeek account login. dsh-base mounts the account provider
+    # (`deepseek-account`, OAuth + PKCE against platform.deepseek.com) and the
+    # `deepseek-account` model route; this row adds the loopback callback
+    # server they need and exposes the account operations and events on the
+    # SDK channel (account/* methods, account.* notifications).
+    - id: android-account
+      name: '@dsh-android/plugin-account'
+      config:
+        locale: !!js "process.env.DSH_ANDROID_LOCALE || ''"
+        # The completion page in the Custom Tab opens this app link.
+        appScheme: dsh-android
+        appPackage: !!js "process.env.DSH_ANDROID_PACKAGE || ''"

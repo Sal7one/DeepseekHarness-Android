@@ -40,7 +40,7 @@ cp "$JS_DIR/engine/package.json" "$JS_DIR/engine/package-lock.json" "$STAGE/"
 
 # ── 2. our packages, copied (never linked) ───────────────────────────────────
 log "adding @dsh-android packages"
-for pkg in bundle-android plugin-device plugin-guard; do
+for pkg in bundle-android plugin-device plugin-guard plugin-account; do
   src="$JS_DIR/packages/$pkg"
   dst="$NM/@dsh-android/$pkg"
   mkdir -p "$dst"
@@ -54,7 +54,7 @@ done
 node -e '
   const fs = require("node:fs"), p = process.argv[1]
   const j = JSON.parse(fs.readFileSync(p, "utf8"))
-  for (const n of ["bundle-android", "plugin-device", "plugin-guard"]) j.dependencies["@dsh-android/" + n] = "0.1.0"
+  for (const n of ["bundle-android", "plugin-device", "plugin-guard", "plugin-account"]) j.dependencies["@dsh-android/" + n] = "0.1.0"
   fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
 ' "$STAGE/package.json"
 
@@ -68,7 +68,6 @@ rm -rf "${HOST_NATIVE:?}"
 if [[ "$(uname -s)-$(uname -m)" == "Linux-aarch64" ]]; then
   mkdir -p "$HOST_NATIVE"
   cp "$NM/@deepseek-ai/node-addon-system-linux-arm64/bin/glibc/system.node" "$HOST_NATIVE/libdsh_flock.so"
-  cp "$NM/node-addon-require-builtin-linux-arm64-gnu/prebuilt/linux-arm64-gnu-napi-v9.node" "$HOST_NATIVE/libdsh_require_builtin.so"
   cp "$NM/node-pty/prebuilds/linux-arm64/pty.node" "$HOST_NATIVE/libdsh_pty.so"
   log "host test bindings -> $HOST_NATIVE"
 fi
@@ -122,6 +121,8 @@ links=$(find "$STAGE" -type l | wc -l)
 [[ -f "$NM/@deepseek-ai/dsh/lib/bin.js" ]] || die "missing dsh entry point"
 grep -q 'libdsh_flock.so' "$NM/@deepseek-ai/node-addon-system/lib/flock.js" || die "flock patch missing"
 grep -q '"@dsh-android/bundle-android"' "$NM/@deepseek-ai/dsh-app-boot/lib/index.js" || die "profile template patch missing"
+grep -q 'sdkExtensions' "$NM/@deepseek-ai/dsh-sdk-jsonrpc-server/lib/index.js" || die "SDK extension patch missing"
+grep -q 'expose-internals' "$NM/node-addon-require-builtin/lib/index.js" || die "require-builtin patch missing"
 [[ -f "$NM/@img/sharp-wasm32/package.json" ]] || die "sharp wasm build missing"
 log "no symlinks; entry point and patches verified"
 

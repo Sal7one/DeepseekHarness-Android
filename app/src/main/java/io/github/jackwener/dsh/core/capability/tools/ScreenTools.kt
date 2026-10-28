@@ -14,7 +14,10 @@ import io.github.jackwener.dsh.core.capability.InvalidArgsException
 import io.github.jackwener.dsh.core.capability.PermissionMissingException
 import io.github.jackwener.dsh.core.capability.Tool
 import io.github.jackwener.dsh.core.capability.ToolResult
+import io.github.jackwener.dsh.core.capability.TextInput
 import io.github.jackwener.dsh.core.capability.ToolSet
+import io.github.jackwener.dsh.core.capability.bool
+import io.github.jackwener.dsh.core.session.SessionStore
 import io.github.jackwener.dsh.core.capability.int
 import io.github.jackwener.dsh.core.capability.reqStr
 import io.github.jackwener.dsh.core.capability.str
@@ -31,7 +34,12 @@ import javax.inject.Singleton
 
 /** Reading and operating the screen through the accessibility service (Shizuku `input` as fallback). */
 @Singleton
-class ScreenTools @Inject constructor(private val shizuku: ShizukuShell, private val vscreen: dagger.Lazy<VirtualScreenTools>) : ToolSet {
+class ScreenTools @Inject constructor(
+    private val shizuku: ShizukuShell,
+    private val vscreen: dagger.Lazy<VirtualScreenTools>,
+    private val textInput: TextInput,
+    private val sessions: dagger.Lazy<SessionStore>,
+) : ToolSet {
     private val lastSnapshot = ConcurrentHashMap<Int, ScreenSnapshot>()
 
     private fun svc() = DshAccessibilityService.instance ?: throw PermissionMissingException("Accessibility service (DSH screen control)")
@@ -57,10 +65,34 @@ class ScreenTools @Inject constructor(private val shizuku: ShizukuShell, private
 
     private suspend fun settle() = delay(400)
 
+    private companion object { const val ERROR_SECURE_WINDOW = 6 /* AccessibilityService.ERROR_TAKE_SCREENSHOT_SECURE_WINDOW (API 34) */ }
+
     private suspend fun readResult(displayId: Int, note: String): ToolResult {
         settle()
         val snap = DshAccessibilityService.instance?.snapshot(displayId)?.also { lastSnapshot[displayId] = it } ?: return ToolResult.text(note)
         return ToolResult.text("$note\nScreen now (${snap.packageName}):\n${snap.text.take(6000)}")
+    }
+
+    /** Mostly-black frame: FLAG_SECURE windows are blanked in screenshots before Android 14 reports it. */
+    private fun isBlank(bmp: android.graphics.Bitmap): Boolean {
+        var dark = 0; var total = 0
+        for (y in 0 until 16) for (x in 0 until 16) {
+            val p = bmp.getPixel(x * (bmp.width - 1) / 15, y * (bmp.height - 1) / 15)
+            total++
+            if ((p shr 16 and 0xff) + (p shr 8 and 0xff) + (p and 0xff) < 24) dark++
+        }
+        return dark >= total * 98 / 100
+    }
+
+    /** Protected (FLAG_SECURE) page: ask the user to do this step by hand (AutoGLM-style takeover). */
+    private suspend fun protectedScreen(call: CallContext): ToolResult {
+        val pkg = DshAccessibilityService.instance?.snapshot()?.packageName ?: "this app"
+        if (call.unattended || call.sessionId.isEmpty()) return ToolResult.error("secure_screen",
+            "The screen of $pkg is protected (screenshots are blocked). It cannot be automated without the user; stop and report this.")
+        val done = sessions.get().requestTakeover(call.sessionId, "screen_capture",
+            "$pkg 的当前页面禁止截图（支付、密码等安全页面），需要你在手机上完成这一步。")
+        return if (done) ToolResult.text("The screen of $pkg is protected, so the user completed this step by hand and tapped Continue. Use screen_read to see where things stand now; do not ask them to repeat it.")
+        else ToolResult.error("user_declined", "The screen of $pkg is protected and the user chose to stop instead of doing the step by hand. Stop and summarize.")
     }
 
     override val tools = listOf(
@@ -80,7 +112,10 @@ class ScreenTools @Inject constructor(private val shizuku: ShizukuShell, private
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val d = display(args)
                 if (d != Display.DEFAULT_DISPLAY) return vscreen.get().capture(d)
-                val bmp = svc().screenshot(d) ?: throw IllegalStateException("Screenshot failed (requires Android 11+)")
+                val shot = svc().capture(d)
+                val bmp = shot.bitmap
+                if (shot.errorCode == ERROR_SECURE_WINDOW || (bmp != null && isBlank(bmp))) return protectedScreen(call)
+                bmp ?: throw IllegalStateException("Screenshot failed (code ${shot.errorCode ?: "n/a"}; requires Android 11+)")
                 return ToolResult.image("image/jpeg", Base64.encodeToString(Images.encode(bmp), Base64.NO_WRAP), "${bmp.width}x${bmp.height}")
             }
         },
@@ -118,19 +153,19 @@ class ScreenTools @Inject constructor(private val shizuku: ShizukuShell, private
             }
         },
         object : Tool("screen_type", ToolGroup.Screen, Risk.write, true,
-            "Type text into an editable field (node id, or the focused field). Replaces the field's content unless append=true.", {
+            "Type text into an editable field (node id, or the focused field). Replaces the field's content unless append=true. Works in WebView/Flutter fields too (falls back to the DSH keyboard, Shizuku or paste).", {
                 string("text", "Text to enter", required = true)
                 int("node", "Editable node id from screen_read (default: focused field)")
+                bool("append", "Append instead of replacing")
                 int("displayId", "Virtual screen id")
             }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val d = display(args)
                 val target = node(args) ?: svc().findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                    ?: throw InvalidArgsException("No focused input field; tap one first or pass node")
-                val ok = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
-                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, args.reqStr("text"))
-                })
-                return readResult(d, if (ok) "Entered text" else "Field rejected text input")
+                val method = textInput.type(svc(), target, args.reqStr("text"), args.bool("append") == true)
+                    ?: return ToolResult.error("input_failed", if (target == null) "No focused input field; tap the field first, then call screen_type again."
+                        else "The field did not accept text by any method (set text, keyboard, Shizuku, paste). Tap the field and retry, or ask the user to type it.")
+                return readResult(d, "Entered text ($method)")
             }
         },
         object : Tool("screen_swipe", ToolGroup.Screen, Risk.write, true, "Swipe/drag from (x1,y1) to (x2,y2).", {

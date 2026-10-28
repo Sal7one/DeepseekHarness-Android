@@ -40,7 +40,11 @@ android {
         buildConfig = true
     }
     packaging {
-        jniLibs { useLegacyPackaging = true }
+        jniLibs {
+            useLegacyPackaging = true
+            // require-builtin is replaced by --expose-internals (js/patches/02); never ship the old addon.
+            excludes += "**/libdsh_require_builtin.so"
+        }
     }
     // Native engine (libnode, JNI wrapper, addons, rg) and the dsh engine bundle are built outside Gradle:
     // native/build.sh and js/build-engine.sh. Point these at their output directories.
@@ -55,6 +59,7 @@ room { schemaDirectory("$projectDir/schemas") }
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
+    implementation(libs.androidx.browser)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -80,4 +85,7 @@ dependencies {
     implementation(libs.shizuku.provider)
     implementation(libs.coil.compose)
     implementation(libs.markdown.m3)
+    testImplementation(libs.junit)
+    // Geofences on devices with Play services (background-FGS-start exempt); LocationManager otherwise.
+    implementation(libs.play.services.location)
 }

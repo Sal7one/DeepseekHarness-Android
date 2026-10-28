@@ -246,14 +246,22 @@ private fun TailActions(turn: Turn) {
 @Composable
 private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings: () -> Unit, retryable: Boolean) {
     val c = Dsh.colors
-    val title = when (e.kind) {
-        "engine" -> stringResource(R.string.err_engine_title)
-        "engine_lost" -> stringResource(R.string.err_engine_lost_title)
-        "no_key" -> stringResource(R.string.err_no_key_title)
+    val account = io.github.jackwener.dsh.feature.account.LocalAccount.current
+    val openPlatform = io.github.jackwener.dsh.feature.account.rememberPlatformOpener()
+    // No credential at all, or the account route refused the request (dsh modelSignInRequired).
+    val needsSignIn = e.kind == "no_credentials" || e.kind == "no_key" || e.code == "ACCOUNT_SIGN_IN_REQUIRED" || e.code == "ACCOUNT_TOKEN_INVALID"
+    val accountQuota = e.code == "ACCOUNT_QUOTA"
+    val title = when {
+        needsSignIn -> stringResource(R.string.acct_model_sign_in_required)
+        accountQuota -> stringResource(R.string.acct_quota_title)
+        e.kind == "engine" -> stringResource(R.string.err_engine_title)
+        e.kind == "engine_lost" -> stringResource(R.string.err_engine_lost_title)
         else -> stringResource(R.string.turn_error_title)
     }
     val message = when {
-        e.kind == "no_key" -> stringResource(R.string.err_no_key)
+        e.kind == "no_credentials" || e.kind == "no_key" -> stringResource(R.string.err_no_key)
+        needsSignIn -> ""
+        accountQuota -> stringResource(R.string.acct_quota_desc)
         e.code?.contains("auth", true) == true || e.message.contains("401") -> stringResource(R.string.err_invalid_key)
         e.message.contains("402") || e.message.contains("insufficient", true) -> stringResource(R.string.err_quota)
         else -> e.message
@@ -264,12 +272,21 @@ private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings:
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = DshType.xs13.copy(fontWeight = FontWeight(600)), color = c.error)
             if (message.isNotBlank()) SelectionContainer { Text(message.take(600), style = DshType.xs13, color = c.labelSecondary) }
-            if (e.code != null && e.kind != "engine") Text(e.code.take(300), style = DshType.mono11, color = c.labelTertiary)
+            if (e.code != null && e.kind != "engine" && !needsSignIn && !accountQuota) Text(e.code.take(300), style = DshType.mono11, color = c.labelTertiary)
             if (e.kind == "engine" && e.code != null) Text(e.code.take(600), style = DshType.mono11, color = c.labelTertiary)
             if (retryable) Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                when (e.kind) {
-                    "no_key" -> DButton(stringResource(R.string.set_api_key), onOpenSettings, size = BtnSize.Sm)
-                    "engine", "engine_lost" -> DButton(stringResource(R.string.restart_engine_retry), { onRetry(e) }, size = BtnSize.Sm, icon = R.drawable.dsw_refresh_outline)
+                when {
+                    needsSignIn -> {
+                        DButton(stringResource(R.string.acct_sign_in), { if (account != null) account.startSignIn() else onOpenSettings() }, size = BtnSize.Sm)
+                        DButton(stringResource(R.string.acct_add_api_key), onOpenSettings, size = BtnSize.Sm, variant = BtnVariant.Outline)
+                        if (e.kind != "no_credentials" && e.kind != "no_key" || account?.signedIn == true)
+                            DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
+                    }
+                    accountQuota -> {
+                        DButton(stringResource(R.string.acct_quota_top_up), { openPlatform(account?.state?.value?.topUpUrl ?: "https://platform.deepseek.com/top_up") }, size = BtnSize.Sm)
+                        DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
+                    }
+                    e.kind == "engine" || e.kind == "engine_lost" -> DButton(stringResource(R.string.restart_engine_retry), { onRetry(e) }, size = BtnSize.Sm, icon = R.drawable.dsw_refresh_outline)
                     else -> DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
                 }
             }
@@ -297,6 +314,7 @@ fun RunningIndicator(live: SessionLive, lastTurn: Turn?) {
     val text = when {
         live.startingEngine -> stringResource(R.string.starting_engine)
         live.waitingForUnlock -> stringResource(R.string.waiting_unlock)
+        live.takeover != null -> stringResource(R.string.takeover_title)
         live.approval != null || live.permission != null -> stringResource(R.string.waiting_approval_inline)
         live.question != null -> stringResource(R.string.waiting_answer_inline)
         else -> stringResource(R.string.deep_diving, Fmt.duration(context, now - start))

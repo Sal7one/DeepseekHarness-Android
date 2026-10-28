@@ -34,10 +34,8 @@ NODE_SHA256=4f5379796280cdaeb0c2f358fd04b6a16cc4fb7dfa83b5a8c91a9d963b435231
 NODE_PTY_VERSION=1.2.0-beta.15
 NAA_PTY_VERSION=7.1.1                 # node-addon-api used by node-pty
 NODE_ADDON_SYSTEM_VERSION=0.1.2
-REQUIRE_BUILTIN_REPO=https://github.com/deepseek-ai/dsh-node-addon-require-builtin
-REQUIRE_BUILTIN_VERSION=0.1.9
-REQUIRE_BUILTIN_COMMIT=a58d3599a2e551d7d706d1ff796c9fd4bbaff63c   # "release: 0.1.9"
-NAA_RB_VERSION=8.9.0                  # node-addon-api pinned in its pnpm-lock
+# node-addon-require-builtin is no longer built: the engine runs with --expose-internals
+# (js/patches/02-require-builtin-expose-internals.patch), so no runtime-probing addon ships.
 
 SRC="$WORK/src"
 NODE_SRC="$SRC/node-v$NODE_VERSION"
@@ -163,7 +161,7 @@ stage_engine() {
 }
 
 # ---------------------------------------------------------------------------
-# addons: node-pty, @deepseek-ai/node-addon-system (flock), node-addon-require-builtin.
+# addons: node-pty, @deepseek-ai/node-addon-system (flock).
 # Each is linked with DT_NEEDED libnode.so: on Android, dlopen()ed objects in an
 # app namespace do not see symbols of libraries loaded by the JNI library unless
 # they depend on them directly.
@@ -220,64 +218,6 @@ stage_addons() {
   "license": "BSD-3-Clause"
 }
 JSON
-
-  # --- node-addon-require-builtin: nodeabi backend, require-builtin product ---
-  local rb="$ADDON_BUILD/dsh-node-addon-require-builtin" naa8="$ADDON_BUILD/node-addon-api-$NAA_RB_VERSION"
-  [ -d "$rb/.git" ] || git clone -q "$REQUIRE_BUILTIN_REPO" "$rb"
-  git -C "$rb" checkout -q "$REQUIRE_BUILTIN_COMMIT"
-  npm_fetch node-addon-api "$NAA_RB_VERSION" "$naa8"
-  local rbsrc="$rb/packages/native/src"
-  local rbsources=(
-    node_api_addon.cc debug_trace.cc native_types.cc runtime_symbol.cc
-    runtime_context/helper.cc runtime_context/platform.cc
-    runtime_context/darwin_arm64.cc runtime_context/darwin_x64.cc
-    runtime_context/linux_arm64.cc runtime_context/linux_x64.cc
-    runtime_context/win32_arm64.cc runtime_context/win32_x64.cc runtime_context/win32_ia32.cc
-    runtime_probe/helper.cc runtime_probe/platform.cc runtime_probe/getter_decoder.cc
-    runtime_probe/posix.cc runtime_probe/win32_common.cc
-    runtime_probe/darwin_arm64.cc runtime_probe/darwin_x64.cc
-    runtime_probe/linux_arm64.cc runtime_probe/linux_x64.cc
-    runtime_probe/win32_arm64.cc runtime_probe/win32_x64.cc runtime_probe/win32_ia32.cc
-    require_builtin_probe.cc runtime_compat_nodeabi.cc
-  )
-  local rbpkg="$NM/node-addon-require-builtin-android-arm64"
-  local rbname="android-arm64-nodeabi-v$modv.node"
-  mkdir -p "$rbpkg/prebuilt"
-  "$TC/bin/target-cxx" -shared -fPIC -O2 -std=c++20 -fvisibility=hidden -fno-exceptions \
-    "${warn[@]}" -Wextra -Wno-cast-function-type-mismatch \
-    -DNAPI_VERSION=9 -DNARB_BACKEND=2 -DNARB_PRODUCT=1 -DHAVE_SQLITE=0 -DHAVE_AMARO=0 \
-    -DNODE_ADDON_API_DISABLE_CPP_EXCEPTIONS -DNODE_GYP_MODULE_NAME=require_builtin \
-    -DBUILDING_NODE_EXTENSION \
-    -isystem "$HEADERS/include/node" -I"$rbsrc" -I"$naa8" \
-    "${rbsources[@]/#/$rbsrc/}" "${LDFLAGS_SO[@]}" \
-    -o "$rbpkg/prebuilt/$rbname"
-  # Optional-package layout probed first by node-addon-native-custom-loader.
-  cat > "$rbpkg/package.json" <<JSON
-{
-  "name": "node-addon-require-builtin-android-arm64",
-  "version": "$REQUIRE_BUILTIN_VERSION",
-  "description": "DSH-Android build of node-addon-require-builtin (nodeabi backend, android-arm64)",
-  "main": "./index.js",
-  "os": ["android"],
-  "cpu": ["arm64"],
-  "dependencies": { "node-addon-native-custom-loader": "$REQUIRE_BUILTIN_VERSION" },
-  "license": "MIT"
-}
-JSON
-  cat > "$rbpkg/prebuilds.json" <<JSON
-{
-  "platform": "android-arm64",
-  "binaries": [
-    { "backend": "nodeabi", "abi": "node-v$modv", "binaryTag": "nodeabi-v$modv",
-      "node": "24", "path": "prebuilt/$rbname" }
-  ]
-}
-JSON
-  printf "'use strict';\n\nconst { loadPrebuild } = require('node-addon-native-custom-loader');\n\nmodule.exports = loadPrebuild(__dirname);\n" > "$rbpkg/index.js"
-  # Same binary at the entry package's local-build fallback path.
-  local local_rb="$NM/node-addon-require-builtin/build/nodeabi/node-v$modv-android-arm64"
-  mkdir -p "$local_rb"
-  cp "$rbpkg/prebuilt/$rbname" "$local_rb/require_builtin.node"
 
   find "$NM" -name '*.node' -exec llvm-strip --strip-unneeded {} \;
 }

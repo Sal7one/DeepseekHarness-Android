@@ -49,6 +49,8 @@ data class Settings(
     val workDetails: WorkDetails = WorkDetails.Standard,
     val busySend: BusySend = BusySend.Queue,
     val defaultPreset: PermissionPreset = PermissionPreset.Ask,
+    /** 允许其他 App 调用: whether the exported RUN_TASK entry accepts tasks from other apps. Off by default. */
+    val allowExternalApps: Boolean = false,
 ) {
     val enabledGroups: Set<ToolGroup> get() = ToolGroup.entries.toSet() - disabledGroups
 
@@ -69,6 +71,7 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         val workDetails = stringPreferencesKey("work_details")
         val busySend = stringPreferencesKey("busy_send")
         val preset = stringPreferencesKey("default_preset")
+        val externalApps = booleanPreferencesKey("allow_external_apps")
     }
 
     val settings: Flow<Settings> = context.store.data.map { it.toSettings() }
@@ -87,6 +90,7 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         workDetails = this[K.workDetails]?.let { v -> WorkDetails.entries.firstOrNull { it.name == v } } ?: WorkDetails.Standard,
         busySend = this[K.busySend]?.let { v -> BusySend.entries.firstOrNull { it.name == v } } ?: BusySend.Queue,
         defaultPreset = PermissionPreset.of(this[K.preset]),
+        allowExternalApps = this[K.externalApps] ?: false,
     )
 
     suspend fun setModel(model: String) = context.store.edit { it[K.model] = model }
@@ -104,4 +108,5 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
     suspend fun setWorkDetails(v: WorkDetails) = context.store.edit { it[K.workDetails] = v.name }
     suspend fun setBusySend(v: BusySend) = context.store.edit { it[K.busySend] = v.name }
     suspend fun setDefaultPreset(p: PermissionPreset) = context.store.edit { it[K.preset] = p.id }
+    suspend fun setAllowExternalApps(on: Boolean) = context.store.edit { it[K.externalApps] = on }
 }

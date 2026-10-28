@@ -63,6 +63,7 @@ class RuleMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        running = true
         startForeground(Notifications.ID_MONITOR, NotificationCompat.Builder(this, Notifications.CHANNEL_MONITOR)
             .setSmallIcon(R.drawable.ic_stat_dsh).setContentTitle(getString(R.string.monitor_running)).setOngoing(true).setSilent(true).build(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -76,6 +77,7 @@ class RuleMonitorService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         runCatching { unregisterReceiver(receiver) }
         runCatching { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(netCallback) }
         super.onDestroy()
@@ -84,9 +86,19 @@ class RuleMonitorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
+        /** Whether the monitor is up (Doctor). */
+        @Volatile var running = false
+            private set
+        /** Set when Android refused to start it from the background (Doctor explains the battery exemption). */
+        @Volatile var lastStartRefused = false
+            private set
+
         fun setRunning(context: Context, running: Boolean) {
             val i = Intent(context, RuleMonitorService::class.java)
-            if (running) runCatching { context.startForegroundService(i) } else context.stopService(i)
+            if (running) {
+                lastStartRefused = runCatching { context.startForegroundService(i) }
+                    .onFailure { android.util.Log.w("RuleMonitorService", "start refused", it) }.isFailure
+            } else context.stopService(i)
         }
     }
 }

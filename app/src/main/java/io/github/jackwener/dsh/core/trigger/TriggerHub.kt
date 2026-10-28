@@ -10,6 +10,11 @@ import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.BatteryManager
 import android.util.Log
+import com.google.android.gms.common.ConnectionResult
+import com.google.android.gms.common.GoogleApiAvailability
+import com.google.android.gms.location.Geofence
+import com.google.android.gms.location.GeofencingRequest
+import com.google.android.gms.location.LocationServices
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jackwener.dsh.R
 import io.github.jackwener.dsh.core.capability.CapabilityHub
@@ -187,20 +192,47 @@ class TriggerHub @Inject constructor(
         return null
     }
 
-    // ---- geofence (no Play services) ----------------------------------------------------------
+    // ---- geofence ------------------------------------------------------------------------------
+    // With Play services: GeofencingClient. Its transition broadcasts are on Android's list of
+    // background foreground-service-start exemptions, so an agent rule can start the engine, and
+    // fused location keeps it cheap. Without Play services (many CN ROMs): the platform
+    // LocationManager.addProximityAlert, which is NOT exempt and only sees background location a few
+    // times an hour — such rules may fire minutes late, and if the FGS start is refused the run
+    // degrades to the 点此执行 notification (DeferredRuns). The rule UI/Doctor say so.
+
+    val playServicesGeofencing: Boolean by lazy {
+        runCatching { GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context) == ConnectionResult.SUCCESS }.getOrDefault(false)
+    }
 
     private fun geofenceIntent(id: Long) = PendingIntent.getBroadcast(context, (id + 500_000).toInt(),
         Intent(context, TriggerReceiver::class.java).setAction(TriggerReceiver.ACTION_GEOFENCE).putExtra("ruleId", id),
         PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
+    /** One shared PendingIntent for all Play-services geofences (request id = rule id). */
+    private val gmsGeofenceIntent by lazy {
+        PendingIntent.getBroadcast(context, 499_999, Intent(context, TriggerReceiver::class.java).setAction(TriggerReceiver.ACTION_GEOFENCE_GMS),
+            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
     private fun registerGeofence(id: Long, g: Trigger.Geofence) {
         if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
+        if (playServicesGeofencing) {
+            val fence = Geofence.Builder().setRequestId(id.toString()).setCircularRegion(g.lat, g.lng, g.radiusM)
+                .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_EXIT).build()
+            val request = GeofencingRequest.Builder().setInitialTrigger(0).addGeofence(fence).build()
+            @Suppress("MissingPermission")
+            runCatching { LocationServices.getGeofencingClient(context).addGeofences(request, gmsGeofenceIntent)
+                .addOnFailureListener { Log.w(TAG, "geofence $id not registered", it) } }
+            return
+        }
         @Suppress("MissingPermission")
         context.getSystemService(LocationManager::class.java).addProximityAlert(g.lat, g.lng, g.radiusM, -1, geofenceIntent(id))
     }
 
     private fun cancelGeofence(id: Long) = runCatching {
-        context.getSystemService(LocationManager::class.java).removeProximityAlert(geofenceIntent(id))
+        if (playServicesGeofencing) LocationServices.getGeofencingClient(context).removeGeofences(listOf(id.toString()))
+        else context.getSystemService(LocationManager::class.java).removeProximityAlert(geofenceIntent(id))
     }
 
 

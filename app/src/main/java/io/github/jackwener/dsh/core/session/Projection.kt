@@ -79,7 +79,7 @@ data class UserMsg(val seq: Long, val time: Long, val text: String, val images: 
 
 enum class TurnStatus { Running, Completed, Failed, Stopped, MaxTokens }
 
-/** kind: llm | engine | engine_lost | no_key | budget. [retryText] re-sends a prompt that never reached the engine. */
+/** kind: llm | engine | engine_lost | no_credentials (legacy no_key) | budget. [retryText] re-sends a prompt that never reached the engine. */
 data class TurnError(val kind: String, val message: String, val code: String?, val retryText: String?)
 
 data class Turn(

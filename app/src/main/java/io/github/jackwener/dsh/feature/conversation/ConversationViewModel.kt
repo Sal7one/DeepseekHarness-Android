@@ -103,6 +103,7 @@ open class ConversationController(
     fun answer(q: PendingQuestion, answers: Map<String, Pair<List<String>, String?>>) = store.answerQuestion(q.requestKey, answers)
     fun skipQuestion(q: PendingQuestion) = store.answerQuestion(q.requestKey, q.questions.associate { it.id to (emptyList<String>() to null) })
     fun answerPermission(requestKey: String, granted: Boolean) = store.answerPermission(requestKey, granted)
+    fun answerTakeover(requestKey: String, done: Boolean) = store.answerTakeover(requestKey, done)
     fun removeQueued(id: String) = store.removeQueued(sessionId.value, id)
     fun sendQueuedNow(id: String) = viewModelScope.launch { store.sendQueuedNow(sessionId.value, id) }
     fun setPreset(p: PermissionPreset) = viewModelScope.launch { store.setPreset(sessionId.value, p) }

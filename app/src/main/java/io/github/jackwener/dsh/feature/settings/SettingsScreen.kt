@@ -93,9 +93,9 @@ private fun openKeyPage(context: android.content.Context) {
 fun isZh(): Boolean = LocalConfiguration.current.locales[0].language == "zh"
 
 enum class SettingsSection(val label: Int) {
-    General(R.string.set_general), Model(R.string.set_model), Agent(R.string.set_agent), WebSearch(R.string.set_web),
+    Account(R.string.acct_nav), General(R.string.set_general), Model(R.string.set_model), Agent(R.string.set_agent), WebSearch(R.string.set_web),
     Usage(R.string.set_usage), Phone(R.string.set_phone), About(R.string.set_about);
-    companion object { fun of(name: String?) = entries.firstOrNull { it.name.equals(name, true) } ?: General }
+    companion object { fun of(name: String?) = entries.firstOrNull { it.name.equals(name, true) } ?: entries.first() }
 }
 
 /** dsh settings at ≤767 px: full-screen sheet, horizontal section strip under the title, stacked rows. */
@@ -110,6 +110,11 @@ fun SettingsScreen(initial: SettingsSection, onBack: () -> Unit, onNotificationA
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding().padding(bottom = 24.dp)) {
             when (section) {
+                SettingsSection.Account -> {
+                    val hasKey by vm.hasKeyFlow.collectAsStateWithLifecycle()
+                    SettingsGroupTitle(stringResource(R.string.acct_nav))
+                    io.github.jackwener.dsh.feature.account.AccountSettingsSection(vm.account, usingApiKey = hasKey)
+                }
                 SettingsSection.General -> GeneralSection(vm)
                 SettingsSection.Model -> ModelSection(vm)
                 SettingsSection.Agent -> AgentSection(vm)
@@ -154,6 +159,8 @@ private fun GeneralSection(vm: SettingsViewModel) {
         SettingsRow(stringResource(R.string.floating_ball), stringResource(R.string.floating_ball_desc), divider = false, trailing = { DSwitch(s.floatingBall, { vm.setBall(it) }) })
         SettingsRow(stringResource(R.string.default_assistant), stringResource(R.string.default_assistant_desc), onClick = { context.startActivity(vm.assistantSettingsIntent()) },
             trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = Dsh.colors.labelTertiary) })
+        SettingsRow(stringResource(R.string.allow_external_apps), stringResource(R.string.allow_external_apps_desc),
+            trailing = { DSwitch(s.allowExternalApps, { vm.setAllowExternalApps(it) }) })
     }
 }
 
@@ -370,6 +377,10 @@ private fun AboutSection(vm: SettingsViewModel) {
         SettingsGroupTitle(stringResource(R.string.engine_log))
         CodeCard(log, label = "engine.log", maxHeight = 320.dp)
     }
+    vm.lastEngineExit?.let { record ->
+        SettingsGroupTitle(stringResource(R.string.engine_last_exit))
+        CodeCard(record, label = "exit / tombstone", maxHeight = 320.dp)
+    }
 }
 
 /** Notification whitelist: which apps' notifications the agent may read (default none). */
@@ -390,16 +401,24 @@ fun NotificationAppsScreen(onBack: () -> Unit, vm: SettingsViewModel = hiltViewM
     }
 }
 
-/** First run without a key: whale + 探索未至之境, then the DeepSeek key card. Straight into the conversation after. */
+/**
+ * First run without a credential (dsh onboarding's model step): whale + 探索未至之境, then the
+ * choice — 登录 DeepSeek 账号 (primary; the sign-in dialog and Custom Tab take over) or 使用 API
+ * Key (the key card). Straight into the conversation once either exists.
+ */
 @Composable
-fun KeyOnboarding(onDone: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
+fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
     val c = Dsh.colors
     val scope = rememberCoroutineScope()
     val status by vm.keyStatus.collectAsStateWithLifecycle()
+    val account = vm.account
+    val accountState by account.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().navigationBarsPadding().padding(24.dp), verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally) {
+    LaunchedEffect(accountState.signedIn) { if (accountState.signedIn) onDone() }
+    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+        verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(48.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             io.github.jackwener.dsh.core.designsystem.Whale(width = 34.dp)
             Spacer(Modifier.width(10.dp))
@@ -409,19 +428,26 @@ fun KeyOnboarding(onDone: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
         Text(stringResource(R.string.onb_tagline), style = DshType.s14, color = c.labelTertiary, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
         Spacer(Modifier.height(32.dp))
         SettingsCard {
-            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(stringResource(R.string.onb_key_title), style = DshType.base16m, color = c.labelPrimary)
-                Text(stringResource(R.string.onb_key_body), style = DshType.xs13, color = c.labelTertiary)
-                DInput(key, { key = it }, placeholder = "sk-…", secret = true, keyboardType = KeyboardType.Password)
-                when (status) {
-                    null -> {}
-                    "checking" -> Text(stringResource(R.string.key_checking), style = DshType.xxs12, color = c.labelTertiary)
-                    else -> Text(stringResource(R.string.key_invalid, status!!), style = DshType.xxs12, color = c.error)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.key_get), Modifier.weight(1f).clip(Radius.sm).clickable { openKeyPage(context) }.padding(vertical = 6.dp),
-                        style = DshType.xs13, color = c.link)
-                    DButton(stringResource(R.string.continue_), { scope.launch { if (vm.saveKey(key) == null) onDone() } }, enabled = key.isNotBlank() && status != "checking")
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(stringResource(R.string.acct_login_title), style = DshType.base16m, color = c.labelPrimary)
+                Text(stringResource(R.string.acct_login_desc), style = DshType.xs13, color = c.labelTertiary)
+                DButton(stringResource(R.string.onb_sign_in), { account.startSignIn() }, Modifier.fillMaxWidth(), size = BtnSize.Lg,
+                    enabled = !accountState.active)
+                DButton(stringResource(R.string.onb_use_key), { onShowKey(!showKey) }, Modifier.fillMaxWidth(), variant = BtnVariant.Outline, size = BtnSize.Lg)
+                if (showKey) {
+                    HDividerSpaced()
+                    Text(stringResource(R.string.onb_key_body), style = DshType.xs13, color = c.labelTertiary)
+                    DInput(key, { key = it }, placeholder = "sk-…", secret = true, keyboardType = KeyboardType.Password)
+                    when (status) {
+                        null -> {}
+                        "checking" -> Text(stringResource(R.string.key_checking), style = DshType.xxs12, color = c.labelTertiary)
+                        else -> Text(stringResource(R.string.key_invalid, status!!), style = DshType.xxs12, color = c.error)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.key_get), Modifier.weight(1f).clip(Radius.sm).clickable { openKeyPage(context) }.padding(vertical = 6.dp),
+                            style = DshType.xs13, color = c.link)
+                        DButton(stringResource(R.string.continue_), { scope.launch { if (vm.saveKey(key) == null) onDone() } }, enabled = key.isNotBlank() && status != "checking")
+                    }
                 }
             }
         }
@@ -429,3 +455,6 @@ fun KeyOnboarding(onDone: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
         Text(stringResource(R.string.onb_disclaimer), style = DshType.xxs12, color = c.labelCaption, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
+
+@Composable
+private fun HDividerSpaced() = io.github.jackwener.dsh.core.designsystem.HDivider(Modifier.padding(vertical = 4.dp))
