@@ -57,7 +57,6 @@ S = [
 ("date_md", "%1$d月%2$d日", "%1$d/%2$d"),
 # hero / composer
 ("hero_title", "探索未至之境", "Into the Unknown"),
-("preview_pill", "预览版", "Preview"),
 ("composer_hint", "发消息或创建任务，/ 调用指令", "Message or run a task, / commands"),
 ("composer_hint_hero", "描述你想让手机做的事，/ 调用指令", "Describe what you want your phone to do, / commands"),
 ("plus_hint", "添加文件或调用指令", "Add files or run commands"),

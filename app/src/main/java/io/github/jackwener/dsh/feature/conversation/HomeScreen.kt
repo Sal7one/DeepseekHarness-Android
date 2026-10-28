@@ -156,8 +156,6 @@ private fun EmptyHero(vm: HomeViewModel, composer: ComposerState, settings: Sett
             Spacer(Modifier.width(10.dp))
             Text(stringResource(R.string.hero_title), style = DshType.xl24.copy(fontSize = DshType.xl24.fontSize * 1.08f, fontWeight = androidx.compose.ui.text.font.FontWeight(500)),
                 color = c.labelPrimary, textAlign = TextAlign.Center)
-            Spacer(Modifier.width(7.dp))
-            Tag(stringResource(R.string.preview_pill), Tone.Info, Modifier.align(Alignment.Top), mono = true)
         }
         Spacer(Modifier.height(28.dp))
         ComposerSlot(vm, composer, settings, live, conv, hero = true, onAutomation = onAutomation)

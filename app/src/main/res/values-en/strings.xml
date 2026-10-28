@@ -54,7 +54,6 @@
     <string name="dur_sep">" "</string>
     <string name="date_md">%1$d/%2$d</string>
     <string name="hero_title">Into the Unknown</string>
-    <string name="preview_pill">Preview</string>
     <string name="composer_hint">Message or run a task, / commands</string>
     <string name="composer_hint_hero">Describe what you want your phone to do, / commands</string>
     <string name="plus_hint">Add files or run commands</string>
