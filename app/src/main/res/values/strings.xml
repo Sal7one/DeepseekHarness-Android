@@ -125,6 +125,10 @@
     <string name="deep_diving">深度求索中，用时 %1$s ···</string>
     <string name="starting_engine">正在启动智能体引擎…</string>
     <string name="waiting_unlock">等待你解锁手机后继续…</string>
+    <string name="waiting_network">等待网络恢复后继续…</string>
+    <string name="network_wait">网络已断开，联网后自动继续</string>
+    <string name="network_resumed">网络恢复后已自动继续</string>
+    <string name="engine_resumed">引擎已重启，已自动继续</string>
     <string name="waiting_approval_inline">等待你的操作</string>
     <string name="waiting_answer_inline">等待你的回答</string>
     <string name="budget_exceeded">已达到用量上限（%1$s：%2$s / %3$s）</string>
@@ -428,7 +432,7 @@
     <string name="granted">已授权</string>
     <string name="set_more">更多</string>
     <string name="notification_apps">允许读取通知的应用（默认全部）</string>
-    <string name="notification_apps_desc">默认不读取任何 App 的通知</string>
+    <string name="notification_apps_desc">默认可以读取所有 App 的通知，可在这里排除不想让它读的 App</string>
     <string name="keep_alive">后台保活</string>
     <string name="shizuku_missing">未安装（可选增强）</string>
     <string name="shizuku_stopped">已安装但未启动</string>

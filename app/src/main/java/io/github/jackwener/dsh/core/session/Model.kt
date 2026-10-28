@@ -78,6 +78,8 @@ data class SessionLive(
     val permissions: List<PendingPermission> = emptyList(),
     val takeovers: List<PendingTakeover> = emptyList(),
     val waitingForUnlock: Boolean = false,
+    /** The turn failed for lack of network; the session waits to be continued once the phone is back online (SessionStore.waitForNetwork). */
+    val waitingForNetwork: Boolean = false,
     val queue: List<QueuedMessage> = emptyList(),
     /** Queued messages handed back to the composer after the run ended without sending them (stop / failure). */
     val restoredDraft: String? = null,
@@ -111,7 +113,7 @@ data class SessionLive(
      * whatever the user sends next.
      */
     fun idle(): SessionLive = copy(
-        running = false, startingEngine = false, runStartedAt = null, waitingForUnlock = false, queue = emptyList(),
+        running = false, startingEngine = false, runStartedAt = null, waitingForUnlock = false, waitingForNetwork = false, queue = emptyList(),
         restoredDraft = (listOfNotNull(restoredDraft) + queue.map { it.text }).joinToString("\n\n").ifEmpty { null },
     )
 

@@ -26,6 +26,7 @@ import io.github.jackwener.dsh.core.model.Risk
 import io.github.jackwener.dsh.core.model.RuleSpec
 import io.github.jackwener.dsh.core.model.ruleIdOfSession
 import io.github.jackwener.dsh.core.platform.AppVisibility
+import io.github.jackwener.dsh.core.platform.Connectivity
 import io.github.jackwener.dsh.core.platform.DeferredRuns
 import io.github.jackwener.dsh.core.platform.Notifications
 import kotlinx.coroutines.CompletableDeferred
@@ -39,6 +40,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -90,7 +93,12 @@ class SessionStore @Inject constructor(
     private val questions = ConcurrentHashMap<String, CompletableDeferred<JsonElement>>()
     private val permissions = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     private val takeovers = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
-    /** Sessions whose interrupted turn was already continued automatically once (cleared when a turn ends normally). */
+    /**
+     * Sessions whose task was already continued automatically once (after an engine loss or an
+     * offline failure). Kept across the continuation turn and after it, so a continuation that
+     * fails again can never arm another one; cleared only when the user starts a new task (a
+     * non-app prompt on an idle or network-waiting session, 重试) or stops the run.
+     */
     private val autoContinued = ConcurrentHashMap.newKeySet<String>()
     private val sessionGrants = ConcurrentHashMap<String, MutableSet<String>>()
     /** sessionId -> engine generation it was last resumed/created in. */
@@ -147,8 +155,8 @@ class SessionStore @Inject constructor(
             else -> RowStatus.Idle
         }
         _status.update { if (it[sessionId] == st) it else it + (sessionId to st) }
-        // CPU stays awake only while some turn is actively running (not while it waits for the user or an unlock).
-        if (states.values.any { it.value.running && !it.value.hasPendingRequest && !it.value.waitingForUnlock }) wakeLock.hold() else wakeLock.release()
+        // CPU stays awake only while some turn is actively running (not while it waits for the user, an unlock or the network).
+        if (states.values.any { it.value.running && !it.value.hasPendingRequest && !it.value.waitingForUnlock && !it.value.waitingForNetwork }) wakeLock.hold() else wakeLock.release()
     }
 
     private fun EventEntity.toLogged() = LoggedEvent(seq, type, time, RpcJson.parseToJsonElement(json) as JsonObject)
@@ -219,14 +227,15 @@ class SessionStore @Inject constructor(
         val live = flowOf(sessionId).value
         attempts.merge(sessionId, 1, Int::plus)
         val appPrompt = text.startsWith(APP_PROMPT_PREFIX)
-        if (!appPrompt) autoContinued.remove(sessionId)
+        // Steering a running turn (also a queued message sent now) stays part of the same task.
+        if (!appPrompt && (!live.running || live.waitingForNetwork)) autoContinued.remove(sessionId)
         // A prompt the app sent for the user is not re-sent verbatim by 重试 (that asks to continue).
         val retryText = text.takeUnless { appPrompt }
         if (existing == null) dao.upsert(SessionEntity(sessionId, text.lineSequence().first().take(40), now, now, ruleId, running = true, preset = live.preset.id))
         else dao.setRunning(sessionId, true)
         // Steering a running session keeps it an engine run (no startingEngine): see hasEngineRuns.
         mutate(sessionId) { it.copy(running = true, exists = true, runStartedAt = it.runStartedAt.takeIf { _ -> live.running } ?: now,
-            startingEngine = it.startingEngine || !live.running) }
+            startingEngine = it.startingEngine || !live.running, waitingForNetwork = false) }
         engine.cancelIdleShutdown()
         if (ruleIdOfSession(sessionId) != null && engine.restarts.open && engine.state.value != EngineState.Ready) {
             // Circuit breaker open: automations do not restart a crash-looping engine (Doctor shows why).
@@ -301,6 +310,8 @@ class SessionStore @Inject constructor(
      */
     suspend fun retry(sessionId: String, error: TurnError) {
         if (flowOf(sessionId).value.running) return
+        // The user asked for a new attempt: it may be continued automatically once again.
+        autoContinued.remove(sessionId)
         mutate(sessionId) { it.copy(running = true, startingEngine = true, runStartedAt = System.currentTimeMillis()) }
         val othersRunning = states.values.any { it.value.running && it.value.sessionId != sessionId }
         if (error.kind == "engine" && engine.state.value == EngineState.Ready && !othersRunning) {
@@ -443,6 +454,8 @@ class SessionStore @Inject constructor(
                 // A torn-down generation's status (its tail drained after the loss) is not this run's.
                 if (gen <= engine.retiredGeneration) return
                 val running = params.s("status") == "running"
+                // A repeated idle while the session waits for the network must not end (or re-arm) the wait.
+                if (!running && flowOf(sessionId).value.waitingForNetwork) return
                 dao.setRunning(sessionId, running)
                 mutate(sessionId) { it.copy(running = running, startingEngine = false, runStartedAt = if (running) (it.runStartedAt ?: System.currentTimeMillis()) else null) }
                 if (!running) onTurnFinished(sessionId)
@@ -637,7 +650,7 @@ class SessionStore @Inject constructor(
     }
 
     private suspend fun onTurnFinished(sessionId: String) {
-        autoContinued.remove(sessionId)
+        if (waitForNetwork(sessionId)) return
         val live = flowOf(sessionId).value
         if (live.queue.isNotEmpty()) {
             val next = live.queue.first()
@@ -657,6 +670,34 @@ class SessionStore @Inject constructor(
     }
 
     /**
+     * The turn just ended failed with a network-type model error ([NETWORK_CODES], already retried
+     * for ~25 s by dsh's llm-retry) while the phone has no validated internet, e.g. the agent itself
+     * turned Wi‑Fi off. Instead of a final failure the session stays running, waiting (no wake lock)
+     * for the network, and then gets one continuation prompt. One automatic continuation per turn
+     * (shared with [onEngineLost], see [autoContinued]): the continuation turn failing offline again
+     * is a final failure. Stop or a new prompt ends the wait. Returns whether it waits.
+     */
+    private suspend fun waitForNetwork(sessionId: String): Boolean {
+        val flow = flowOf(sessionId)
+        val end = flow.value.events.lastOrNull { it.type == "turn/start" || it.type == "turn/end" }?.takeIf { it.type == "turn/end" } ?: return false
+        val reason = end.data.o("reason")
+        if (reason?.s("kind") != "error" || reason.o("error")?.s("code") !in NETWORK_CODES) return false
+        if (dao.get(sessionId)?.parentId != null || Connectivity.online(context) || !autoContinued.add(sessionId)) return false
+        android.util.Log.w(TAG, "session $sessionId: turn failed offline; continuing when the network is back")
+        // Marked running like a live turn, so an app restart meanwhile shows it as interrupted (继续).
+        dao.setRunning(sessionId, true)
+        mutate(sessionId) { it.copy(running = true, waitingForNetwork = true, runStartedAt = System.currentTimeMillis()) }
+        appendLocal(sessionId, "app/notice", buildJsonObject { put("kind", NETWORK_WAIT); put("text", context.getString(R.string.network_wait)) })
+        scope.launch {
+            combine(Connectivity.onlineFlow(context), flow) { online, s -> online || !s.waitingForNetwork }.first { it }
+            if (!flow.value.waitingForNetwork) return@launch
+            mutate(sessionId) { it.copy(waitingForNetwork = false) }
+            prompt(sessionId, CONTINUE_AFTER_NETWORK, ruleIdOfSession(sessionId))
+        }
+        return true
+    }
+
+    /**
      * The engine channel closed unexpectedly (AC8). dsh's `session/resume` only repairs the
      * interrupted final turn (closes dangling tool calls) and cannot continue it, so recovery is:
      * after the [RestartPolicy][io.github.jackwener.dsh.core.engine.RestartPolicy] backoff
@@ -669,7 +710,9 @@ class SessionStore @Inject constructor(
         if (stopping) return
         android.util.Log.w(TAG, "engine gen $gen lost; retry in $retryInMs ms")
         cancelPending()
-        val running = states.values.map { it.value }.filter { it.running }.map { it.sessionId }.toSet() + dao.running().map { it.id }
+        // A session waiting for the network has no turn in the engine; its continuation starts a new one.
+        val waiting = states.values.map { it.value }.filter { it.waitingForNetwork }.map { it.sessionId }.toSet()
+        val running = states.values.map { it.value }.filter { it.running }.map { it.sessionId }.toSet() + dao.running().map { it.id } - waiting
         val roots = mutableListOf<String>()
         running.forEach { id ->
             dao.setRunning(id, false)
@@ -680,7 +723,7 @@ class SessionStore @Inject constructor(
             if (retryInMs != null && autoContinued.add(id)) {
                 // Continues the same task: its queue stays and is sent after the continuation, as usual.
                 mutate(id) { it.copy(running = true, startingEngine = true, runStartedAt = System.currentTimeMillis(), waitingForUnlock = false) }
-                appendLocal(id, "app/notice", buildJsonObject { put("text", context.getString(R.string.engine_recovering)) })
+                appendLocal(id, "app/notice", buildJsonObject { put("kind", ENGINE_RECOVERING); put("text", context.getString(R.string.engine_recovering)) })
             } else {
                 mutate(id) { it.idle() }
                 appendLocal(id, "app/error", buildJsonObject {
@@ -713,7 +756,18 @@ class SessionStore @Inject constructor(
 
         /** Model-facing continuation after an engine crash (the interrupted tool calls were closed by session/resume). */
         const val CONTINUE_AFTER_CRASH = APP_PROMPT_PREFIX + "The agent engine stopped unexpectedly and was restarted, so your previous turn was " +
-            "interrupted. Check which steps already completed (do not repeat them), then continue the task."
+            "interrupted. Every tool call above that has a successful result already took effect: do NOT call any tool to repeat or " +
+            "re-apply it, even if the device state now looks different (the user may have changed it since). A call without a result " +
+            "may not have run; check before redoing only that one. Then continue the remaining steps; if nothing is left, just give the final reply."
+
+        /** Model-facing continuation once the phone is back online after a turn failed offline ([waitForNetwork]). */
+        const val CONTINUE_AFTER_NETWORK = APP_PROMPT_PREFIX + "The network dropped and your previous reply could not be sent, so your " +
+            "previous turn ended early; the network is back now. Every tool call shown above already ran and its effect is done. Do NOT call " +
+            "any tool to repeat or re-apply them, even if the device state now looks different: the user may have changed it since " +
+            "(e.g. turned the network back on). Only do steps of the task that were never attempted; if all its actions are done, just give the final reply."
+
+        /** Model error codes of a request that could not reach the provider (dsh LlmError). */
+        val NETWORK_CODES = setOf("TRANSPORT", "TIMEOUT")
 
         /** Log-only records the phone UI never shows; they carry the whole prompt and tool schema. */
         val UNLOGGED = setOf("request/header", "request/context", "system/message", "developer/message", "session/end-seed")

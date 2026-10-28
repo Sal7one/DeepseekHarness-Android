@@ -70,6 +70,19 @@ internal fun LoggedEvent.isReplacement() = data[SURFACE_OP_KEY] != null
  */
 const val APP_PROMPT_PREFIX = "[DSH] "
 
+/** `kind` of the `app/notice` that turns a turn's offline failure into a wait for the network (SessionStore.waitForNetwork). */
+const val NETWORK_WAIT = "network_wait"
+
+/** `kind` of the `app/notice` that an engine crash interrupted the turn and it will be continued (SessionStore.onEngineLost). */
+const val ENGINE_RECOVERING = "engine_recovering"
+
+/**
+ * Notices announcing an automatic continuation of the turn they sit in. When the continuation
+ * prompt ([APP_PROMPT_PREFIX]) arrives, its turn is folded into the interrupted one, so the user
+ * sees one task whose status is the continuation's, and the notice is marked [Block.Notice.resumed].
+ */
+val CONTINUATION_NOTICES = setOf(NETWORK_WAIT, ENGINE_RECOVERING)
+
 // ---- conversation projection --------------------------------------------------------------------
 
 enum class ToolState { Running, Done, Error, Rejected, Stopped }
@@ -92,7 +105,8 @@ sealed interface Block {
         val endTime: Long?,
     ) : Block
     data class Compaction(override val key: String, val live: Boolean, val count: Int, val tokens: Long, val summary: String, val failed: Boolean) : Block
-    data class Notice(override val key: String, val text: String) : Block
+    /** [kind]: a [CONTINUATION_NOTICES] kind or null; [resumed]: its continuation has started (shown in the past tense). */
+    data class Notice(override val key: String, val text: String, val kind: String? = null, val resumed: Boolean = false) : Block
 }
 
 data class UserMsg(val seq: Long, val time: Long, val text: String, val images: Int, val files: Int)
@@ -132,7 +146,7 @@ data class Conversation(
 }
 
 object Projector {
-    private class TurnB(val key: String, val number: Int?, var start: Long) {
+    private class TurnB(val key: String, var number: Int?, var start: Long) {
         var user: UserMsg? = null
         val blocks = mutableListOf<Block>()
         var end: Long? = null
@@ -155,11 +169,22 @@ object Projector {
             }
         }
         fun current(time: Long, seq: Long): TurnB = open() ?: TurnB("t$seq", null, time).also { turns += it }
+        // The turn whose last notice announced an automatic continuation that has not started yet.
+        var awaiting: TurnB? = null
+        // The continuation prompt was logged before its turn/start: that turn/start continues this one.
+        var resumeInto: TurnB? = null
+        fun resume(prev: TurnB, number: Int?) {
+            prev.number = number ?: prev.number; prev.end = null; prev.status = TurnStatus.Running; prev.error = null
+            prev.blocks.replaceAll { b -> if (b is Block.Notice && b.kind in CONTINUATION_NOTICES) b.copy(resumed = true) else b }
+        }
 
         for (e in events) {
             val d = e.data
             when (e.type) {
                 "turn/start" -> {
+                    val into = resumeInto
+                    resumeInto = null
+                    if (into != null && turns.lastOrNull() === into) { resume(into, d.i("turn")); continue }
                     open()?.let { close(it, e.time, TurnStatus.Stopped) }
                     // Todo state is session-level in dsh (last write wins), so it carries across turns.
                     turns += TurnB("t${e.seq}", d.i("turn"), e.time)
@@ -167,7 +192,17 @@ object Projector {
                 "user/message" -> {
                     if (d.o("source")?.s("kind") != "user" || e.isReplacement()) continue
                     val content = d["content"]
-                    if (textOf(content).startsWith(APP_PROMPT_PREFIX)) continue
+                    val prev = awaiting
+                    awaiting = null
+                    if (textOf(content).startsWith(APP_PROMPT_PREFIX)) {
+                        // The continuation's turn becomes the rest of the interrupted one: one task, one status.
+                        val t = open()
+                        if (prev != null && t != null && t !== prev && t.user == null && t.blocks.isEmpty() && turns.lastOrNull() === t) {
+                            turns.removeAt(turns.lastIndex)
+                            resume(prev, t.number)
+                        } else if (prev != null && turns.lastOrNull() === prev) resumeInto = prev
+                        continue
+                    }
                     val msg = UserMsg(e.seq, e.time, textOf(content), countOf(content, "image"), countOf(content, "file"))
                     val t = open()
                     if (t != null && t.user == null && t.blocks.isEmpty()) t.user = msg
@@ -244,7 +279,14 @@ object Projector {
                     close(t, e.time, TurnStatus.Failed)
                 }
                 "app/stopped" -> open()?.let { close(it, e.time, TurnStatus.Stopped) }
-                "app/notice" -> current(e.time, e.seq).blocks += Block.Notice("n${e.seq}", d.s("text") ?: "")
+                "app/notice" -> {
+                    // The failure it follows is not final: the turn stays open until the continuation (or a stop).
+                    val kind = d.s("kind")
+                    if (kind == NETWORK_WAIT) turns.lastOrNull()?.takeIf { it.status == TurnStatus.Failed }?.let { it.end = null; it.status = TurnStatus.Running; it.error = null }
+                    val t = current(e.time, e.seq)
+                    t.blocks += Block.Notice("n${e.seq}", d.s("text") ?: "", kind)
+                    if (kind in CONTINUATION_NOTICES) awaiting = t
+                }
             }
         }
         if (!running) open()?.let { t -> close(t, events.lastOrNull()?.time ?: t.start, TurnStatus.Stopped) }

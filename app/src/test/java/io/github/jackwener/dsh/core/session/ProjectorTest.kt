@@ -53,6 +53,89 @@ class ProjectorTest {
         assertNull(Projector.conversation(events, running = true).turns.single().user)
     }
 
+    @Test fun `offline failure followed by the network wait notice is not a final failure`() {
+        val events = listOf(
+            ev(0, "turn/start", """{"turn":1}"""),
+            ev(1, "tool/call", """{"callId":"c1","name":"wifi_set","arguments":"{}"}"""),
+            result(2, "Wi-Fi off"),
+            ev(3, "turn/end", """{"turn":1,"reason":{"kind":"error","error":{"message":"DeepSeek Messages transport failed","code":"TRANSPORT"}}}"""),
+            ev(-1, "app/notice", """{"kind":"$NETWORK_WAIT","text":"offline"}""", time = 4000),
+        )
+        val turn = Projector.conversation(events, running = true).turns.single()
+        assertEquals(TurnStatus.Running, turn.status)
+        assertNull(turn.error)
+        assertTrue(turn.blocks.last() is Block.Notice)
+        // Without the notice the same log is a failed turn.
+        assertEquals(TurnStatus.Failed, Projector.conversation(events.dropLast(1), running = false).turns.single().status)
+    }
+
+    private val offlineTurn = listOf(
+        ev(0, "turn/start", """{"turn":1}"""),
+        ev(1, "user/message", """{"source":{"kind":"user"},"content":[{"type":"text","text":"turn off wifi"}]}"""),
+        ev(2, "tool/call", """{"callId":"c1","name":"wifi_set","arguments":"{}"}"""),
+        result(3, "Wi-Fi off"),
+        ev(4, "turn/end", """{"turn":1,"reason":{"kind":"error","error":{"message":"transport failed","code":"TRANSPORT"}}}"""),
+        ev(-1, "app/notice", """{"kind":"$NETWORK_WAIT","text":"offline"}""", time = 4500),
+    )
+    private val continuation = listOf(
+        ev(5, "turn/start", """{"turn":2}"""),
+        ev(6, "user/message", """{"source":{"kind":"user"},"content":[{"type":"text","text":"${APP_PROMPT_PREFIX}continue"}]}"""),
+        ev(7, "assistant/message", """{"message":{"content":[{"type":"text","text":"Wi-Fi is off."}]}}"""),
+    )
+
+    @Test fun `offline failure continued after the network is back is one turn with the continuation's status`() {
+        val waiting = Projector.conversation(offlineTurn, running = true).turns.single()
+        assertEquals(TurnStatus.Running, waiting.status)
+        assertEquals(false, (waiting.blocks.last() as Block.Notice).resumed)
+
+        val running = Projector.conversation(offlineTurn + continuation, running = true).turns.single()
+        assertEquals(TurnStatus.Running, running.status)
+
+        val done = offlineTurn + continuation + ev(8, "turn/end", """{"turn":2,"reason":{"kind":"completed"}}""")
+        val turn = Projector.conversation(done, running = false).turns.single()
+        assertEquals(TurnStatus.Completed, turn.status)
+        assertNull(turn.error)
+        assertEquals("turn off wifi", turn.user?.text)
+        assertEquals("Wi-Fi is off.", turn.reply?.text)
+        val notice = turn.blocks.filterIsInstance<Block.Notice>().single()
+        assertTrue(notice.resumed)
+        assertEquals(ToolState.Done, (turn.blocks.first { it is Block.Tool } as Block.Tool).state)
+    }
+
+    @Test fun `continuation that fails again shows one failure`() {
+        val events = offlineTurn + continuation.take(2) +
+            ev(8, "turn/end", """{"turn":2,"reason":{"kind":"error","error":{"message":"transport failed","code":"TRANSPORT"}}}""")
+        val conv = Projector.conversation(events, running = false)
+        val turn = conv.turns.single()
+        assertEquals(TurnStatus.Failed, turn.status)
+        assertEquals("TRANSPORT", turn.error?.code)
+        assertTrue(turn.blocks.filterIsInstance<Block.Notice>().single().resumed)
+    }
+
+    @Test fun `continuation prompt logged before its turn start continues the same turn`() {
+        val events = offlineTurn + listOf(continuation[1], continuation[0], continuation[2], ev(8, "turn/end", """{"turn":2,"reason":{"kind":"completed"}}"""))
+        val turn = Projector.conversation(events, running = false).turns.single()
+        assertEquals(TurnStatus.Completed, turn.status)
+        assertTrue(turn.blocks.filterIsInstance<Block.Notice>().single().resumed)
+    }
+
+    @Test fun `engine crash continuation is folded into the interrupted turn`() {
+        val events = listOf(
+            ev(0, "turn/start", """{"turn":1}"""),
+            ev(1, "tool/call", """{"callId":"c1","name":"shell","arguments":"{}"}"""),
+            ev(-1, "app/notice", """{"kind":"$ENGINE_RECOVERING","text":"restarting"}""", time = 1500),
+        ) + continuation + ev(8, "turn/end", """{"turn":2,"reason":{"kind":"completed"}}""")
+        val turn = Projector.conversation(events, running = false).turns.single()
+        assertEquals(TurnStatus.Completed, turn.status)
+        assertTrue(turn.blocks.filterIsInstance<Block.Notice>().single().resumed)
+    }
+
+    @Test fun `a user prompt after a wait notice starts a new turn`() {
+        val events = offlineTurn + ev(5, "turn/start", """{"turn":2}""") +
+            ev(6, "user/message", """{"source":{"kind":"user"},"content":[{"type":"text","text":"never mind"}]}""")
+        assertEquals(2, Projector.conversation(events, running = true).turns.size)
+    }
+
     @Test fun `pending requests queue and the next becomes visible`() {
         val a = PendingApproval("a", "s", "t1", null, null, null, Risk.read, true)
         val b = PendingApproval("b", "s", "t2", null, null, null, Risk.read, true)

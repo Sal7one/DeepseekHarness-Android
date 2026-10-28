@@ -325,6 +325,7 @@ fun RunningIndicator(live: SessionLive, lastTurn: Turn?) {
     val text = when {
         live.startingEngine -> stringResource(R.string.starting_engine)
         live.waitingForUnlock -> stringResource(R.string.waiting_unlock)
+        live.waitingForNetwork -> stringResource(R.string.waiting_network)
         live.takeover != null -> stringResource(R.string.takeover_title)
         live.approval != null || live.permission != null -> stringResource(R.string.waiting_approval_inline)
         live.question != null -> stringResource(R.string.waiting_answer_inline)

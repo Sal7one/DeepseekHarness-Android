@@ -125,6 +125,10 @@
     <string name="deep_diving">Deep diving for %1$s ···</string>
     <string name="starting_engine">Starting the agent engine…</string>
     <string name="waiting_unlock">Waiting for you to unlock the phone…</string>
+    <string name="waiting_network">Waiting for the network to come back…</string>
+    <string name="network_wait">The network is down; this will continue automatically once you\'re back online</string>
+    <string name="network_resumed">Continued automatically once the network was back</string>
+    <string name="engine_resumed">The engine was restarted and the task continued automatically</string>
     <string name="waiting_approval_inline">Waiting for your action</string>
     <string name="waiting_answer_inline">Waiting for your answer</string>
     <string name="budget_exceeded">Budget limit reached (%1$s: %2$s / %3$s)</string>
@@ -428,7 +432,7 @@
     <string name="granted">Granted</string>
     <string name="set_more">More</string>
     <string name="notification_apps">Apps whose notifications can be read (all by default)</string>
-    <string name="notification_apps_desc">No app\'s notifications are readable by default</string>
+    <string name="notification_apps_desc">All apps\' notifications are readable by default; exclude the ones you want kept private</string>
     <string name="keep_alive">Keep running in background</string>
     <string name="shizuku_missing">Not installed (optional)</string>
     <string name="shizuku_stopped">Installed, not running</string>
