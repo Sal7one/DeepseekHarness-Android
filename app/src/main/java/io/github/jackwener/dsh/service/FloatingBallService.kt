@@ -13,14 +13,21 @@ import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.ImageView
 import androidx.core.app.NotificationCompat
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import io.github.jackwener.dsh.R
 import io.github.jackwener.dsh.core.platform.Notifications
 import io.github.jackwener.dsh.feature.quick.QuickActivity
 import kotlin.math.abs
 
-/** Edge-docked floating button that opens the quick panel from any app. */
+/** Edge-docked floating button that opens the quick panel from any app. Hidden while our own UI is in front. */
 class FloatingBallService : Service() {
     private var view: ImageView? = null
+    private val appInFront = object : DefaultLifecycleObserver {
+        override fun onStart(owner: LifecycleOwner) { view?.visibility = android.view.View.GONE }
+        override fun onStop(owner: LifecycleOwner) { view?.visibility = android.view.View.VISIBLE }
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onCreate() {
@@ -56,11 +63,13 @@ class FloatingBallService : Service() {
         }
         wm.addView(v, lp)
         view = v
+        ProcessLifecycleOwner.get().lifecycle.addObserver(appInFront)
     }
 
     private fun open() = startActivity(Intent(this, QuickActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
 
     override fun onDestroy() {
+        ProcessLifecycleOwner.get().lifecycle.removeObserver(appInFront)
         view?.let { getSystemService(WindowManager::class.java).removeView(it) }
         super.onDestroy()
     }
