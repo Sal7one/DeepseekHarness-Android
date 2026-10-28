@@ -41,7 +41,8 @@ data class Settings(
     val effort: Effort = Effort.High,
     /** Device tool groups the user switched off (everything else is offered to the agent). */
     val disabledGroups: Set<ToolGroup> = emptySet(),
-    val notificationApps: Set<String> = emptySet(),
+    /** Apps whose notifications DSH must not read (default: none — every app is readable). */
+    val notificationBlocked: Set<String> = emptySet(),
     val floatingBall: Boolean = false,
     val dailyTokenLimit: Long = 0,
     val sessionTokenLimit: Long = 0,
@@ -63,7 +64,7 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         val model = stringPreferencesKey("model")
         val effort = stringPreferencesKey("effort")
         val disabledGroups = stringSetPreferencesKey("disabled_groups")
-        val notifApps = stringSetPreferencesKey("notif_apps")
+        val notifBlocked = stringSetPreferencesKey("notif_blocked")
         val ball = booleanPreferencesKey("floating_ball")
         val dailyTokens = longPreferencesKey("daily_tokens")
         val sessionTokens = longPreferencesKey("session_tokens")
@@ -82,7 +83,7 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         model = this[K.model] ?: Settings.DEFAULT_MODEL,
         effort = Effort.of(this[K.effort]),
         disabledGroups = this[K.disabledGroups]?.mapNotNull(ToolGroup::of)?.toSet() ?: DEFAULT_DISABLED,
-        notificationApps = this[K.notifApps] ?: emptySet(),
+        notificationBlocked = this[K.notifBlocked] ?: emptySet(),
         floatingBall = this[K.ball] ?: false,
         dailyTokenLimit = this[K.dailyTokens] ?: 0,
         sessionTokenLimit = this[K.sessionTokens] ?: 0,
@@ -99,7 +100,7 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         val cur = it[K.disabledGroups] ?: DEFAULT_DISABLED.map { g -> g.id }.toSet()
         it[K.disabledGroups] = if (enabled) cur - group.id else cur + group.id
     }
-    suspend fun setNotificationApps(apps: Set<String>) = context.store.edit { it[K.notifApps] = apps }
+    suspend fun setNotificationBlocked(apps: Set<String>) = context.store.edit { it[K.notifBlocked] = apps }
     suspend fun setFloatingBall(on: Boolean) = context.store.edit { it[K.ball] = on }
     suspend fun setLimits(daily: Long, session: Long) = context.store.edit {
         it[K.dailyTokens] = daily; it[K.sessionTokens] = session

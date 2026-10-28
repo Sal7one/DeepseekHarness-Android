@@ -102,12 +102,15 @@ callback).
 
 Browser round trip on Android: `account/sign-in/start` opens a loopback HTTP server on `127.0.0.1:<random port>` (the
 provider's `webServer`), sends `redirect_uri = http://127.0.0.1:<port>/oauth/callback` to Platform's `auth_init` and
-returns; the app opens `authorizeUrl` (+ `theme=light|dark`) in a Chrome Custom Tab from MainActivity (so the tab sits on
-the app's task). Platform redirects the tab to the loopback callback; the provider validates `state`, exchanges the code
-with the PKCE verifier and commits the grant. Instead of Platform's completion page (or dsh's "close this tab" page), the
-tab gets a local page that opens `intent://account/login?result=…#Intent;scheme=dsh-android;package=<pkg>;end`
-(automatically, and from a 返回 DSH button); MainActivity (`singleTask`, VIEW filter `dsh-android://account`) comes forward
-and clears the tab. The app also tries to bring MainActivity forward itself when the attempt settles.
+returns; the app shows `authorizeUrl` (+ `theme=light|dark`) in its own sign-in screen, a WebView inside MainActivity
+(feature/account/PlatformWebScreen.kt; no Custom Tab, so OEM browsers cannot turn it into a separate browser task).
+Platform redirects the page to the loopback callback (cleartext allowed for 127.0.0.1 / localhost only, via
+`network_security_config`); the provider validates `state`, exchanges the code with the PKCE verifier and commits the
+grant. Instead of Platform's completion page (or dsh's "close this tab" page), the callback answers with a local page that
+opens `intent://account/login?result=…#Intent;scheme=dsh-android;package=<pkg>;end` (automatically, and from a 返回 DSH
+button); the WebView intercepts that navigation and closes the screen, which also closes when the attempt settles.
+Closing the screen (✕, or Back with no page history) cancels the attempt (`account/sign-in/cancel`). The VIEW filter
+`dsh-android://account` on MainActivity remains for a sign-in link copied into another browser.
 
 **Session id convention:** attended sessions use a random UUID. Sessions started by automations use `auto_<ruleId>_<uuid>`; the app auto-answers `approval/request` for these (allowed only if the tool is in the rule's whitelist, else `rejected`).
 

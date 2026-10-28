@@ -473,7 +473,7 @@ fun NotificationAppsScreen(onBack: () -> Unit, vm: SettingsViewModel = hiltViewM
         if (loaded == null) Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { io.github.jackwener.dsh.core.designsystem.Spinner(20.dp) }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp).navigationBarsPadding()) {
             items(apps.filter { q.isBlank() || it.first.contains(q, true) || it.second.contains(q, true) }, key = { it.second }) { (label, pkg) ->
-                SettingsRow(label, pkg, trailing = { DSwitch(pkg in s.notificationApps, { vm.toggleNotificationApp(pkg) }) })
+                SettingsRow(label, pkg, trailing = { DSwitch(pkg !in s.notificationBlocked, { vm.toggleNotificationApp(pkg) }) })
             }
         }
     }
@@ -481,7 +481,7 @@ fun NotificationAppsScreen(onBack: () -> Unit, vm: SettingsViewModel = hiltViewM
 
 /**
  * First run without a credential (dsh onboarding's model step): whale + 探索未至之境, then the
- * choice — 登录 DeepSeek 账号 (primary; the sign-in dialog and Custom Tab take over) or 使用 API
+ * choice — 登录 DeepSeek 账号 (primary; the sign-in dialog and the in-app sign-in screen take over) or 使用 API
  * Key (the key card). Straight into the conversation once either exists.
  */
 @Composable

@@ -34,10 +34,8 @@ import io.github.jackwener.dsh.core.data.SecretStore
 import io.github.jackwener.dsh.feature.account.AccountToastHost
 import io.github.jackwener.dsh.feature.account.LocalAccount
 import io.github.jackwener.dsh.feature.account.SignInDialog
-import io.github.jackwener.dsh.feature.account.openPlatform
+import io.github.jackwener.dsh.feature.account.PlatformWebScreen
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.data.ThemeMode
 import io.github.jackwener.dsh.core.designsystem.Dsh
@@ -96,15 +94,12 @@ class MainActivity : ComponentActivity() {
             DshTheme(theme ?: ThemeMode.System) {
                 val c = Dsh.colors
                 LaunchedEffect(c.isDark) { account.darkTheme = c.isDark }
-                // Platform's authorization page opens in a Custom Tab on top of this task.
-                LaunchedEffect(c.isDark) {
-                    repeatOnLifecycle(Lifecycle.State.STARTED) {
-                        account.browserRequests.collect { url -> openPlatform(this@MainActivity, url, c.isDark, c.bgBase) }
-                    }
-                }
+                // Platform pages (sign-in, 充值, 用量) cover the app in its own WebView screen.
+                val platformPage by account.page.collectAsStateWithLifecycle()
                 CompositionLocalProvider(LocalAccount provides account) {
                     Box(Modifier.fillMaxSize().background(c.bgBase)) {
-                        if (theme != null) AppNav(vm.hasCredentials)
+                        if (theme != null) AppNav(vm.hasCredentials, platformPage == null)
+                        platformPage?.let { PlatformWebScreen(it, account) }
                         AccountToastHost(account)
                     }
                 }
@@ -120,14 +115,17 @@ class MainActivity : ComponentActivity() {
         handleAppLink(intent)
     }
 
-    /** `dsh-android://account/login?result=…` from the sign-in completion page in the Custom Tab. */
+    /**
+     * `dsh-android://account/login?result=…` from the engine's sign-in completion page when it was
+     * opened outside the app (the copied sign-in link); the in-app screen intercepts it itself.
+     */
     private fun handleAppLink(intent: Intent?) {
         val data = intent?.data ?: return
-        if (data.scheme == "dsh-android" && data.host == "account") account.onReturnedFromBrowser()
+        if (data.scheme == "dsh-android" && data.host == "account") account.onSignInReturned()
     }
 
     @Composable
-    private fun AppNav(hasCredentials: Boolean) {
+    private fun AppNav(hasCredentials: Boolean, dialogs: Boolean) {
         val nav = rememberNavController()
         val home: HomeViewModel = hiltViewModel()
         val accountState by account.state.collectAsStateWithLifecycle()
@@ -141,7 +139,8 @@ class MainActivity : ComponentActivity() {
             }
         }
         val start = remember { if (hasCredentials) "home" else "onboarding" }
-        if (accountState.loginVisible) SignInDialog(account, onUseApiKey = {
+        // The dialog is a window of its own: hidden while the Platform screen is up.
+        if (accountState.loginVisible && dialogs) SignInDialog(account, onUseApiKey = {
             if (nav.currentDestination?.route == "onboarding") onboardingKey = true
             else nav.navigate("settings?section=Model")
         })

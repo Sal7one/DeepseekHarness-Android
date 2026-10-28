@@ -415,7 +415,8 @@ const READ_ONLY = new Map(Object.entries({
   sort: lacks('-o', '--output', /^-[A-Za-z]*o/),
   uniq: args => positional(args).length <= 1,
   xxd: args => !args.includes('-r') && positional(args).length <= 1,
-  date: args => args.every(w => w.startsWith('+') || /^-(u|R|I\w*)$/.test(w)),
+  // Only -s/--set changes anything (`date -d tomorrow +%A`, `TZ=… date` are reads).
+  date: lacks('-s', '--set', /^-[A-Za-z]*s/),
   find: lacks('-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'),
   dumpsys: args => !args.some(w => /^(set|reset|unplug|enable|disable|clear|--reset|-c)$/.test(w)),
   settings: args => ['get', 'list'].includes(firstWord(args.filter((w, i) => args[i - 1] !== '--user'))),

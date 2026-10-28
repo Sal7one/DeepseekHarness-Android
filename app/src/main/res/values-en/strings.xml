@@ -399,7 +399,7 @@
     <string name="grp_system">System</string>
     <string name="grp_system_desc">Volume, brightness, DND, alarms, Wi‑Fi, Bluetooth</string>
     <string name="grp_notif">Notifications</string>
-    <string name="grp_notif_desc">Read notifications from allowed apps</string>
+    <string name="grp_notif_desc">Read notifications (block specific apps in settings)</string>
     <string name="grp_comms">Contacts &amp; SMS</string>
     <string name="grp_comms_desc">Contacts, SMS, call log, calendar</string>
     <string name="grp_media">Media</string>
@@ -427,7 +427,7 @@
     <string name="set_phone_desc">The agent asks for these when a task first needs them. Review or grant them ahead of time here.</string>
     <string name="granted">Granted</string>
     <string name="set_more">More</string>
-    <string name="notification_apps">Readable notifications</string>
+    <string name="notification_apps">Apps whose notifications can be read (all by default)</string>
     <string name="notification_apps_desc">No app\'s notifications are readable by default</string>
     <string name="keep_alive">Keep running in background</string>
     <string name="shizuku_missing">Not installed (optional)</string>
@@ -498,10 +498,10 @@
     <string name="acct_login_title">Get started</string>
     <string name="acct_login_desc">Sign in to your DeepSeek account or add an API Key to get started. Your projects and files are stored locally.</string>
     <string name="acct_browser_title">Waiting for sign in</string>
-    <string name="acct_browser_prompt">"Page did not open automatically? "</string>
+    <string name="acct_browser_prompt">"Sign-in page did not open? "</string>
     <string name="acct_copy_link">Copy sign-in link</string>
     <string name="acct_copied_link">Link copied</string>
-    <string name="acct_browser_desc">, then open it in your browser to finish signing in.</string>
+    <string name="acct_browser_desc">, then open it in a browser to finish signing in.</string>
     <string name="acct_timeout_title">Sign in timed out</string>
     <string name="acct_timeout_desc">Sign in again to continue.</string>
     <string name="acct_failure_title">Could not sign in</string>
@@ -515,9 +515,9 @@
     <string name="acct_sign_out_unknown">Could not check running tasks. Signing out may interrupt tasks using this account. Sign out now?</string>
     <string name="acct_sign_out_desc">Signing out will not delete any data. You can sign in to this account again.</string>
     <string name="acct_sign_out_running">Tasks are currently running. Signing out will interrupt them. Sign out now?</string>
-    <string name="acct_open">Open browser</string>
+    <string name="acct_open">Open sign-in page</string>
     <string name="acct_initializing">Starting sign in…</string>
-    <string name="acct_waiting">Continue in your browser</string>
+    <string name="acct_waiting">Continue on the sign-in page</string>
     <string name="acct_completing">Completing sign in…</string>
     <string name="acct_expired">Sign in expired. Try again.</string>
     <string name="acct_failed">Could not complete the operation. Try again.</string>
@@ -580,5 +580,8 @@
     <string name="about_disclaimer_title">Disclaimer</string>
     <string name="about_oss_title">Open-source licenses</string>
     <string name="about_oss_shizuku">Includes Shizuku %1$s (RikkaApps, Apache License 2.0), the official unmodified APK, used only for one-tap install. Tap to view the license.</string>
+    <string name="web_sign_in_title">Sign in to DeepSeek</string>
+    <string name="web_platform_title">DeepSeek Platform</string>
+    <string name="web_load_failed">Could not load the page. Check your network and try again.</string>
     <string name="rule_missing">This automation no longer exists</string>
 </resources>

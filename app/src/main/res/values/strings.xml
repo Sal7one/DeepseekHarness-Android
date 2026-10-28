@@ -399,7 +399,7 @@
     <string name="grp_system">系统设置</string>
     <string name="grp_system_desc">音量、亮度、勿扰、闹钟、Wi‑Fi、蓝牙</string>
     <string name="grp_notif">通知</string>
-    <string name="grp_notif_desc">读取白名单 App 的通知</string>
+    <string name="grp_notif_desc">读取通知（可在设置里屏蔽指定 App）</string>
     <string name="grp_comms">联系人与短信</string>
     <string name="grp_comms_desc">联系人、短信、通话记录、日历</string>
     <string name="grp_media">媒体</string>
@@ -427,7 +427,7 @@
     <string name="set_phone_desc">智能体用到某项能力时才会请你授权。这里可以查看和提前授予。</string>
     <string name="granted">已授权</string>
     <string name="set_more">更多</string>
-    <string name="notification_apps">可读取通知的应用</string>
+    <string name="notification_apps">允许读取通知的应用（默认全部）</string>
     <string name="notification_apps_desc">默认不读取任何 App 的通知</string>
     <string name="keep_alive">后台保活</string>
     <string name="shizuku_missing">未安装（可选增强）</string>
@@ -498,10 +498,10 @@
     <string name="acct_login_title">开始使用</string>
     <string name="acct_login_desc">登录 DeepSeek 账号，或添加 API Key，即可开始使用。你的项目和文件保存在本地。</string>
     <string name="acct_browser_title">等待登录</string>
-    <string name="acct_browser_prompt">没有自动打开新页面？</string>
+    <string name="acct_browser_prompt">登录页没有打开？</string>
     <string name="acct_copy_link">复制登录链接</string>
     <string name="acct_copied_link">链接已复制</string>
-    <string name="acct_browser_desc">，手动打开登录页完成登录。</string>
+    <string name="acct_browser_desc">，在浏览器中打开完成登录。</string>
     <string name="acct_timeout_title">登录已超时</string>
     <string name="acct_timeout_desc">请重新登录后继续操作。</string>
     <string name="acct_failure_title">登录失败</string>
@@ -515,9 +515,9 @@
     <string name="acct_sign_out_unknown">暂时无法确认任务状态。退出登录可能会中断使用此账号的任务，是否继续？</string>
     <string name="acct_sign_out_desc">退出登录不会丢失任何数据，你仍可以登录此账号。</string>
     <string name="acct_sign_out_running">当前有进程正在执行中，点击“退出登录”，将会打断进程，是否即刻退出登录？</string>
-    <string name="acct_open">打开浏览器</string>
+    <string name="acct_open">打开登录页</string>
     <string name="acct_initializing">正在发起登录…</string>
-    <string name="acct_waiting">请在浏览器中继续</string>
+    <string name="acct_waiting">请在登录页中继续</string>
     <string name="acct_completing">正在完成登录…</string>
     <string name="acct_expired">登录已过期，请重试。</string>
     <string name="acct_failed">操作未完成，请重试。</string>
@@ -580,5 +580,8 @@
     <string name="about_disclaimer_title">声明</string>
     <string name="about_oss_title">开源许可</string>
     <string name="about_oss_shizuku">内置 Shizuku %1$s（RikkaApps，Apache License 2.0），官方未修改的安装包，仅用于一键安装。点按查看许可证。</string>
+    <string name="web_sign_in_title">登录 DeepSeek</string>
+    <string name="web_platform_title">DeepSeek 开放平台</string>
+    <string name="web_load_failed">页面加载失败，请检查网络后重试。</string>
     <string name="rule_missing">这个自动化任务已不存在</string>
 </resources>

@@ -77,8 +77,8 @@ class SettingsViewModel @Inject constructor(
     fun setBall(on: Boolean) = viewModelScope.launch { repo.setFloatingBall(on); FloatingBallService.setEnabled(context, on) }
     fun setLimits(daily: Long, session: Long) = viewModelScope.launch { repo.setLimits(daily, session) }
     fun toggleNotificationApp(pkg: String) = viewModelScope.launch {
-        val cur = settings.value.notificationApps
-        repo.setNotificationApps(if (pkg in cur) cur - pkg else cur + pkg)
+        val cur = settings.value.notificationBlocked
+        repo.setNotificationBlocked(if (pkg in cur) cur - pkg else cur + pkg)
     }
 
     /** Validates against DeepSeek's /models before saving. Returns null on success, else the error. */

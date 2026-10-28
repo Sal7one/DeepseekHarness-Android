@@ -1,6 +1,5 @@
 package io.github.jackwener.dsh.feature.account
 
-import android.content.Context
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -37,7 +36,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -77,14 +75,15 @@ import kotlinx.coroutines.launch
 /** The account service for composables (null outside MainActivity, e.g. the quick panel). */
 val LocalAccount = staticCompositionLocalOf<AccountRepository?> { null }
 
-/** Open a Platform page (充值 / 用量 / sign-in) in a Custom Tab with the app's palette. */
-fun openPlatform(context: Context, url: String, dark: Boolean, toolbar: Color) = Browser.open(context, url, dark, toolbar.toArgb())
-
+/**
+ * Opens a Platform page (充值 / 用量 / account): in MainActivity's in-app WebView screen, so Back
+ * returns to DSH; outside it (the quick panel has no account service) in the user's browser.
+ */
 @Composable
 fun rememberPlatformOpener(): (String) -> Unit {
     val context = LocalContext.current
-    val c = Dsh.colors
-    return remember(c) { { url: String -> openPlatform(context, url, c.isDark, c.bgBase) } }
+    val account = LocalAccount.current
+    return remember(account) { { url: String -> if (account != null) account.openPage(url) else Browser.openExternal(context, url) } }
 }
 
 /** dsh AccountAvatar: the profile picture once loaded, else the user glyph on a skeleton circle. */
@@ -133,7 +132,7 @@ fun SignInDialog(account: AccountRepository, onUseApiKey: () -> Unit) {
             { if (active) dismiss() else { account.showLogin(false); onUseApiKey() } }, variant = BtnVariant.Outline, enabled = !committing)
         when {
             waiting && phase == SignInPhase.WaitingBrowser && a?.authorizeUrl != null ->
-                DButton(stringResource(R.string.acct_open), { account.reopenBrowser() })
+                DButton(stringResource(R.string.acct_open), { account.openSignInPage() })
             waiting -> Box(Modifier.heightIn(min = 36.dp).clip(Radius.md).background(c.brandPrimary).padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
                 Spinner(14.dp, c.labelOnPrimary)
             }
@@ -253,7 +252,7 @@ fun AccountSettingsSection(account: AccountRepository, usingApiKey: Boolean) {
                 }
             }
             if (active) Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                if (attempt?.authorizeUrl != null) DButton(stringResource(R.string.acct_open), { account.reopenBrowser() }, variant = BtnVariant.Outline, size = BtnSize.Sm)
+                if (attempt?.authorizeUrl != null) DButton(stringResource(R.string.acct_open), { account.openSignInPage() }, variant = BtnVariant.Outline, size = BtnSize.Sm)
                 val scope = rememberCoroutineScope()
                 DButton(stringResource(R.string.cancel), { scope.launch { account.cancel() } }, variant = BtnVariant.Outline, size = BtnSize.Sm,
                     enabled = attempt?.phase != SignInPhase.Committing)

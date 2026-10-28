@@ -131,7 +131,7 @@ class ShellAccess @Inject constructor(@ApplicationContext private val context: C
 
     fun launchIntent(): Intent? = context.packageManager.getLaunchIntentForPackage(PACKAGE)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-    /** Play Store when Google Play is there, else null (caller opens [RELEASES_URL] in a Custom Tab). */
+    /** Play Store when Google Play is there, else null (caller opens [RELEASES_URL] in the browser). */
     fun playStoreIntent(): Intent? {
         val hasPlay = runCatching { context.packageManager.getPackageInfo("com.android.vending", 0); true }.getOrDefault(false)
         if (!hasPlay) return null

@@ -149,7 +149,7 @@ revocation; `llm-deepseek-account` = the `deepseek-account` model route). The pl
   `127.0.0.1`, OS-assigned port, opened on the first sign-in (logged as `login callback server on http://127.0.0.1:<port>`).
   dsh's success redirect / failure page / cancel answer on that route are replaced by a local completion page that opens
   the app link `intent://account/login?result=ok|failed|cancelled#Intent;scheme=dsh-android;package=$DSH_ANDROID_PACKAGE;end`,
-  so the Chrome Custom Tab hands control back to the app (other answers — 400 bad state, 410 stale — pass through).
+  so the app's sign-in WebView (or a browser the link was copied to) hands control back to the app (other answers — 400 bad state, 410 stale — pass through).
 - **SDK surface** (via patch 10's `sdkExtensions` service): `account/state`, `account/details`, `account/sign-in/start`,
   `account/sign-in/cancel`, `account/sign-out`, `account/tasks/running`; notifications `account.changed`,
   `account.session-expired`, `account.signed-out`, `account.model-sign-in-required`, `account.callback`.
@@ -262,7 +262,7 @@ with A+B, ~90 s):
 
 Not covered on the host (needs the phone): the bionic native addons themselves, `/system/bin/sh`, `link(2)` EACCES (the
 fallback code path is only reached on Android), image *attachments* reaching an image-capable model (DeepSeek's text models
-get the placeholder note), `user-question/ask` round trip; the Custom Tab → `http://127.0.0.1:<port>/oauth/callback` → app-link return of a real login.
+get the placeholder note), `user-question/ask` round trip; the in-app sign-in WebView → `http://127.0.0.1:<port>/oauth/callback` → app-link return of a real login.
 
 ## Size
 

@@ -1,15 +1,12 @@
 package io.github.jackwener.dsh.core.account
 
 import android.content.Context
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
-import io.github.jackwener.dsh.MainActivity
 import io.github.jackwener.dsh.core.engine.EngineManager
-import io.github.jackwener.dsh.core.platform.AppVisibility
 import io.github.jackwener.dsh.core.session.o
 import io.github.jackwener.dsh.core.session.s
 import kotlinx.coroutines.CoroutineScope
@@ -47,9 +44,10 @@ import javax.inject.Singleton
  *
  * The engine owns everything secret: PKCE, the loopback callback on 127.0.0.1, the token in
  * `$DSH_HOME`'s credential store, model/search authentication. This class mirrors the safe view,
- * asks the UI to open the authorization page in a Custom Tab, brings the app back when the
- * attempt settles, and keeps a small display cache (name / contact / avatar) so the drawer and
- * the onboarding decision work while the engine is stopped.
+ * asks the UI to show the authorization page in the in-app sign-in screen ([page]; a WebView, so
+ * the flow never leaves the app whatever the default browser is), closes it when the attempt
+ * settles, and keeps a small display cache (name / contact / avatar) so the drawer and the
+ * onboarding decision work while the engine is stopped.
  */
 @Singleton
 class AccountRepository @Inject constructor(
@@ -68,9 +66,9 @@ class AccountRepository @Inject constructor(
     /** Live toasts (dsh AccountMenu): session expired, model needs sign-in. Not replayed. */
     val notices: SharedFlow<AccountNotice> = _notices.asSharedFlow()
 
-    private val _browser = MutableSharedFlow<String>(extraBufferCapacity = 2)
-    /** Authorization URLs the foreground activity should open in a Custom Tab. */
-    val browserRequests: SharedFlow<String> = _browser.asSharedFlow()
+    private val _page = MutableStateFlow<PlatformPage?>(null)
+    /** The Platform page MainActivity shows full-screen in its WebView (sign-in, 充值, 用量), or null. */
+    val page: StateFlow<PlatformPage?> = _page.asStateFlow()
 
     private val _avatar = MutableStateFlow(loadAvatar())
     val avatar: StateFlow<Bitmap?> = _avatar.asStateFlow()
@@ -100,7 +98,7 @@ class AccountRepository @Inject constructor(
             val previous = _state.value.attempt
             try {
                 // A new attempt replaces a finished one; an active one is joined (dsh startSignIn).
-                if (previous?.phase?.active == true && previous.id != PENDING) { ownAttempt = previous.id; reopenBrowser(); return@launch }
+                if (previous?.phase?.active == true && previous.id != PENDING) { ownAttempt = previous.id; openSignInPage(); return@launch }
                 if (previous?.id == PENDING) return@launch
                 engine.get().cancelIdleShutdown()
                 // Placeholder so the dialog shows 正在发起登录… while the engine boots.
@@ -120,8 +118,37 @@ class AccountRepository @Inject constructor(
         }
     }
 
-    /** Reopen the authorization page (dsh "打开浏览器"). */
-    fun reopenBrowser() { _state.value.attempt?.authorizeUrl?.let { _browser.tryEmit(themed(it)) } }
+    /** Show the authorization page of the active attempt (dsh "打开浏览器"). */
+    fun openSignInPage() {
+        val a = _state.value.attempt ?: return
+        val url = a.authorizeUrl ?: return
+        if (a.phase == SignInPhase.WaitingBrowser) _page.value = PlatformPage(themed(url), signIn = true)
+    }
+
+    /** Show a plain Platform page (充值 / 用量 / account) in the in-app screen. */
+    fun openPage(url: String) { _page.value = PlatformPage(url, signIn = false) }
+
+    /**
+     * The user closed the screen (close button, or Back with no page history left). Leaving the
+     * sign-in page abandons the attempt (account cancel) unless it is already being committed.
+     */
+    fun closePage() {
+        val p = _page.value ?: return
+        _page.value = null
+        if (!p.signIn) return
+        val a = _state.value.attempt
+        if (a != null && a.phase.active && a.phase != SignInPhase.Committing) scope.launch { cancel() }
+    }
+
+    /**
+     * The sign-in page reached the engine's completion page, which navigates to
+     * `dsh-android://account/login?result=…`: close the screen and re-read the account state
+     * (the attempt's own stream frames normally got there first).
+     */
+    fun onSignInReturned() {
+        if (_page.value?.signIn == true) _page.value = null
+        onReturnedFromBrowser()
+    }
 
     fun authorizeUrl(): String? = _state.value.attempt?.authorizeUrl?.let(::themed)
 
@@ -166,7 +193,7 @@ class AccountRepository @Inject constructor(
         }
     }
 
-    /** The Custom Tab returned through the app link (or the user closed it). */
+    /** The completion page's app link arrived (in-app screen, or a browser the link was copied to). */
     fun onReturnedFromBrowser() {
         if (_state.value.known) return
         scope.launch { runCatching { apply(call("account/state")) } }
@@ -193,6 +220,7 @@ class AccountRepository @Inject constructor(
             if (s.active) s.copy(attempt = s.attempt?.copy(phase = SignInPhase.Failed, errorCode = "no-response"), known = false)
             else s.copy(known = false)
         }
+        if (_page.value?.signIn == true) _page.value = null
     }
 
     private fun apply(view: JsonElement) {
@@ -218,36 +246,29 @@ class AccountRepository @Inject constructor(
         prefs.edit().putBoolean(K_SIGNED_IN, signedIn).apply()
         if (!signedIn && before.signedIn) clearCache()
         if (attempt != null && attempt.id == ownAttempt) {
-            maybeOpenBrowser(attempt)
-            if (!attempt.phase.active && before.attempt?.phase?.active == true) onAttemptSettled(attempt)
+            maybeOpenSignIn(attempt)
+            if (!attempt.phase.active && before.attempt?.phase?.active == true) onAttemptSettled()
         }
+        // The attempt behind an open sign-in page is over (signed in, cancelled elsewhere, expired,
+        // failed): the dialog takes over with the result.
+        if (_page.value?.signIn == true && (attempt == null || !attempt.phase.active || signedIn)) _page.value = null
         if (signedIn && !before.signedIn) {
             // New login: the next prompt switches the engine route (EngineManager.sdk) when no API key is set.
             refresh()
         }
     }
 
-    private fun maybeOpenBrowser(a: SignInAttempt) {
+    private fun maybeOpenSignIn(a: SignInAttempt) {
         val url = a.authorizeUrl ?: return
         if (a.phase != SignInPhase.WaitingBrowser || openedFor == a.id) return
         openedFor = a.id
-        _browser.tryEmit(themed(url))
+        _page.value = PlatformPage(themed(url), signIn = true)
     }
 
-    /**
-     * dsh closes its authorization tab when the attempt settles; here the Custom Tab sits on top of
-     * the app's task, so bringing MainActivity (singleTask) forward clears it. Android may refuse a
-     * background activity start; then the completion page's app link (or the tab's close button)
-     * brings the user back.
-     */
-    private fun onAttemptSettled(a: SignInAttempt) {
+    /** dsh closes its authorization tab when the attempt settles; the sign-in page is closed in [apply]. */
+    private fun onAttemptSettled() {
         ownAttempt = null
         engine.get().scheduleIdleShutdown()
-        if (a.phase == SignInPhase.Cancelled || AppVisibility.isForeground) return
-        runCatching {
-            context.startActivity(Intent(context, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP))
-        }.onFailure { Log.i(TAG, "could not bring the app forward: ${it.message}") }
     }
 
     private fun themed(url: String): String = runCatching {

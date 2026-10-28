@@ -229,10 +229,10 @@ class TriggerHub @Inject constructor(
     private suspend fun describe(s: RuleSpec, e: DeviceEvent) = when (e) {
         is DeviceEvent.Notification -> {
             // A rule bound to one app is the user's consent for that app; an "any app" rule only passes
-            // the text of apps on the notification read allowlist (Me → Notifications).
-            val readable = (s.trigger as? Trigger.Notification)?.packageName != null || e.packageName in settings.current().notificationApps
+            // the text of apps the user has not blocked (Settings → Notifications).
+            val readable = (s.trigger as? Trigger.Notification)?.packageName != null || e.packageName !in settings.current().notificationBlocked
             if (readable) "notification from ${e.packageName}: ${e.title} — ${e.text.take(500)}"
-            else "notification from ${e.packageName} (content hidden: this app is not on the notification read allowlist)"
+            else "notification from ${e.packageName} (content hidden: the user blocked reading this app's notifications)"
         }
         is DeviceEvent.Wifi -> "Wi-Fi ${if (e.connected) "connected" else "disconnected"}${e.ssid?.let { " ($it)" } ?: ""}"
         is DeviceEvent.Battery -> "battery at ${e.percent}%"

@@ -28,7 +28,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import io.github.jackwener.dsh.core.designsystem.LocalReducedMotion
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,7 +102,11 @@ private fun ConversationPane(vm: HomeViewModel, onMenu: () -> Unit, onSettings: 
     }
     val empty = conv.isEmpty && !live.running
     BackHandler(view == SessionView.Trajectory) { vm.view.value = SessionView.Chat }
-
+    // While the run waits on the user (approval / question / permission / takeover card) nothing is
+    // happening, so stop the "working" animations: the UI settles to idle, which also lets
+    // accessibility services and UI automation read the card's buttons.
+    val waitingOnUser = live.approval != null || live.question != null || live.permission != null || live.takeover != null
+    CompositionLocalProvider(LocalReducedMotion provides (LocalReducedMotion.current || waitingOnUser)) {
     Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             IconBtn(R.drawable.dsw_panel_left_outline, onMenu, size = 40.dp, iconSize = 18.dp, tint = c.labelPrimary, contentDescription = stringResource(R.string.open_sidebar))
@@ -135,6 +141,7 @@ private fun ConversationPane(vm: HomeViewModel, onMenu: () -> Unit, onSettings: 
                     variant = io.github.jackwener.dsh.core.designsystem.BtnVariant.Outline, icon = R.drawable.dsw_stop_fill)
             } else Spacer(Modifier.navigationBarsPadding())
         }
+    }
     }
 }
 

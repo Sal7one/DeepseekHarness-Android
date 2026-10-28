@@ -33,6 +33,12 @@ data class SignInAttempt(
     val errorCode: String? = null,
 )
 
+/**
+ * A Platform page shown in the in-app WebView screen: the attempt's authorization page
+ * ([signIn]; leaving it cancels the attempt) or a plain page such as 充值 / 用量.
+ */
+data class PlatformPage(val url: String, val signIn: Boolean)
+
 data class AccountProfile(val id: String?, val name: String?, val contact: String?, val avatarUrl: String?)
 
 data class Wallet(val currency: String, val balance: String) {

@@ -25,7 +25,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -113,8 +112,6 @@ class ShellGuideFlow(
     val installer: ShizukuInstaller,
     private val installState: State<ShizukuInstallState>,
     private val context: Context,
-    private val dark: Boolean,
-    private val toolbar: Int,
 ) {
     var openedShizuku by mutableStateOf(false)
     var askedPermission by mutableStateOf(false)
@@ -131,7 +128,7 @@ class ShellGuideFlow(
     fun storeFallback() {
         val play = access.playStoreIntent()
         if (play != null && runCatching { context.startActivity(play) }.isSuccess) return
-        Browser.open(context, ShellAccess.RELEASES_URL, dark, toolbar)
+        Browser.openExternal(context, ShellAccess.RELEASES_URL)
     }
     fun openShizuku() {
         access.launchIntent()?.let { i -> if (runCatching { context.startActivity(i) }.isSuccess) { openedShizuku = true; return } }
@@ -146,10 +143,9 @@ class ShellGuideFlow(
 @Composable
 fun rememberShellGuideFlow(access: ShellAccess, state: ShellState): ShellGuideFlow {
     val context = LocalContext.current
-    val c = Dsh.colors
     val installer = remember { shizukuInstallerOf(context) }
     val installState = installer.state.collectAsStateWithLifecycle()
-    val flow = remember(access) { ShellGuideFlow(access, installer, installState, context, c.isDark, c.bgBase.toArgb()) }
+    val flow = remember(access) { ShellGuideFlow(access, installer, installState, context) }
     LaunchedEffect(state) {
         // Installed / updated (or done elsewhere): the install step is over.
         if (state !is ShellState.NotInstalled && state !is ShellState.Unsupported) installer.reset()
@@ -252,7 +248,7 @@ fun ShellGuideActions(s: ShellState, flow: ShellGuideFlow, onDecline: (() -> Uni
 
 /**
  * Standalone Shizuku card for 设置 → 手机权限 and the onboarding 增强能力 step: status, guidance and
- * — once ready — the one-time "start on boot (wireless debugging)" tip.
+ * — once ready, and again whenever it stopped after a reboot — the "start on boot (wireless debugging)" tip.
  */
 @Composable
 fun ShellAccessCard(modifier: Modifier = Modifier, onDecline: (() -> Unit)? = null) {
@@ -268,7 +264,9 @@ fun ShellAccessCard(modifier: Modifier = Modifier, onDecline: (() -> Unit)? = nu
                 Tag(shellStateLabel(LocalContext.current, s), if (s.ready) Tone.Success else Tone.Neutral)
             }
             ShellGuideBody(s, null, flow)
-            if (s.ready && access.bootTipApplicable && !tipDismissed) {
+            // After a reboot (was ready, now stopped) always repeat the tip: having to restart it proves boot-start is off.
+            val rebootTip = s is ShellState.InstalledNotRunning && s.wasReady && access.bootTipApplicable
+            if ((s.ready && access.bootTipApplicable && !tipDismissed) || rebootTip) {
                 Box(Modifier.size(2.dp))
                 Text(stringResource(R.string.shz_boot_tip), style = DshType.xs13, color = c.labelSecondary)
             }

@@ -39,15 +39,15 @@ class NotificationTools @Inject constructor(
 ) : ToolSet {
     private fun listener() = DshNotificationListener.instance ?: throw PermissionMissingException("Notification access")
 
-    private suspend fun allowed(): Set<String> = settings.current().notificationApps.toSet()
+    /** Apps the user blocked from being read (default: none). */
+    private suspend fun blocked(): Set<String> = settings.current().notificationBlocked
 
-    private val notAllowedYet = "The user has not allowed any app's notifications to be read. Ask them to choose apps in DSH → Me → Notifications."
 
     /** A notification from an allowed app by key, or a model-readable error. */
     private suspend fun find(key: String): StatusBarNotification {
         val sbn = listener().activeNotifications.firstOrNull { it.key == key }
             ?: throw InvalidArgsException("No current notification with key $key (it may have been dismissed); call notification_list again")
-        if (sbn.packageName !in allowed()) throw InvalidArgsException("${sbn.packageName} is not on the notification allowlist (DSH → Me → Notifications)")
+        if (sbn.packageName in blocked()) throw InvalidArgsException("The user blocked reading ${sbn.packageName} notifications (DSH settings → Notifications)")
         return sbn
     }
 
@@ -77,31 +77,30 @@ class NotificationTools @Inject constructor(
 
     override val tools = listOf(
         object : Tool("notification_list", ToolGroup.Notifications, Risk.sensitive, false,
-            "List current notifications from apps the user allowed (Me → Notifications), with their latest messages, action buttons (\"(reply)\" = can reply) and key.", {
+            "List current notifications (apps the user blocked in settings are skipped), with their latest messages, action buttons (\"(reply)\" = can reply) and key.", {
                 string("package", "Only this app"); int("limit", "Default 30")
             }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                val allowed = allowed()
-                if (allowed.isEmpty()) return ToolResult.text(notAllowedYet)
+                val blocked = blocked()
                 val pkg = args.str("package")
-                if (pkg != null && pkg !in allowed) return ToolResult.text("$pkg is not on the notification allowlist, so its notifications cannot be read. Ask the user to add it in DSH → Me → Notifications.")
+                if (pkg != null && pkg in blocked) return ToolResult.text("The user blocked reading $pkg notifications (DSH settings → Notifications); ask them to unblock it if needed.")
                 val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.US)
-                val list = listener().activeNotifications.filter { it.packageName in allowed && (pkg == null || it.packageName == pkg) }
+                val list = listener().activeNotifications.filter { it.packageName !in blocked && (pkg == null || it.packageName == pkg) }
                     .sortedByDescending { it.postTime }.take((args.int("limit") ?: 30).coerceIn(1, 100))
                 return ToolResult.text(list.joinToString("\n") { "${fmt.format(Date(it.postTime))} ${describe(it)}  key=${it.key}" }.ifEmpty { "No notifications." })
             }
         },
-        object : Tool("notification_dismiss", ToolGroup.Notifications, Risk.write, false, "Dismiss notifications by key (or all dismissable ones from allowed apps).", {
-            strings("keys", "Keys from notification_list; empty = all allowed")
+        object : Tool("notification_dismiss", ToolGroup.Notifications, Risk.write, false, "Dismiss notifications by key (or all dismissable ones).", {
+            strings("keys", "Keys from notification_list; empty = all")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val keys = args.strs("keys").toSet()
-                val allowed = allowed()
+                val blocked = blocked()
                 val l = listener()
-                val targets = l.activeNotifications.filter { it.packageName in allowed && it.isClearable && (keys.isEmpty() || it.key in keys) }
+                val targets = l.activeNotifications.filter { it.packageName !in blocked && it.isClearable && (keys.isEmpty() || it.key in keys) }
                 l.cancelNotifications(targets.map { it.key }.toTypedArray())
                 val skipped = if (keys.isEmpty()) 0 else keys.size - targets.size
-                return ToolResult.text("Dismissed ${targets.size}" + if (skipped > 0) " ($skipped not found, ongoing, or not on the allowlist)" else "")
+                return ToolResult.text("Dismissed ${targets.size}" + if (skipped > 0) " ($skipped not found, ongoing, or blocked)" else "")
             }
         },
         object : Tool("notification_open", ToolGroup.Notifications, Risk.write, true,
