@@ -58,7 +58,7 @@ android {
     // Native engine (libnode, JNI wrapper, addons, rg) and the dsh engine bundle are built outside Gradle:
     // native/build.sh and js/build-engine.sh. Point these at their output directories.
     sourceSets["main"].jniLibs.directories += providers.gradleProperty("dsh.nativeOut").orElse("../toolchains/out/jniLibs").get()
-    sourceSets["main"].assets.directories += providers.gradleProperty("dsh.engineOut").orElse("../toolchains/out/engine-assets").get()
+    sourceSets["main"].assets.directories += providers.gradleProperty("dsh.engineOut").orElse("../toolchains/out/engine").get()
     // assets/shizuku/{shizuku.apk,LICENSE}, written by tools/fetch-shizuku.sh (task fetchShizuku below).
     sourceSets["main"].assets.directories += "$thirdPartyOut/assets"
 }

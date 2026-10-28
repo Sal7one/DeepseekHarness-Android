@@ -1,6 +1,6 @@
 # DSH Web design tokens -> Android Compose / M3
 
-Extracted read-only from the DeepSeek Harness checkout (`scratch/dsh`). All paths below are relative to that repo root.
+Extracted from the DeepSeek Harness source. Paths below are relative to the dsh repository root. The app's implementation is in `app/src/main/java/io/github/jackwener/dsh/core/designsystem/` (§8).
 Theme switch on web: `body` = light, `body[data-ds-dark-theme]` = dark. Feature code only consumes `--dsw-alias-*`; the static scale is private to the theme.
 
 Key fact for porting: the **brand primary is monochrome** (near-black in light, near-white in dark). The DeepSeek blue (`deepseek-500` #4176E6) is the *accent* used for links, info buttons, focus rings, "business" state and the selected sidebar item, not for primary buttons.
@@ -50,7 +50,7 @@ Source: `packages/client/ui-theme/src/styles/design-platform.css`
 
 ### 1.2 Semantic aliases (resolved)
 
-"@n%" = alpha. `≈` = computed by me from `color-mix(in srgb, ...)`.
+"@n%" = alpha. `≈` = computed from `color-mix(in srgb, ...)`.
 
 **Text / labels**
 
@@ -176,7 +176,7 @@ Sources: `packages/client/ui-theme/src/styles/base.css`, `brand-font.css`, `grad
 
 **Families**
 - Text (`--dsh-font-family-text-default`): `-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif` — i.e. system UI font; CJK via PingFang SC / Hiragino Sans GB / Microsoft YaHei. On Android: `FontFamily.Default` (Roboto + Noto Sans CJK fallback).
-- Code (`--dsh-font-family-code-default`): `'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei'` (no bare `monospace` tail on purpose — avoids SimSun on Windows CJK). Android: bundle JetBrains Mono, or `FontFamily.Monospace`.
+- Code (`--dsh-font-family-code-default`): `'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei'` (no bare `monospace` tail on purpose — avoids SimSun on Windows CJK). Android: `FontFamily.Monospace` (no bundled font).
 - Brand (`--dsw-font-family-brand`): `'Montserrat'` (bundled woff2, weights 300/400/500, SIL OFL; `brand-font.css`), then text stack. Used for wordmark/brand display only.
 - User-configurable: font lists `--dsh-font-family-text/-code` prepend to the stacks; content font size 10–22px (default 14), code size 10–16px (default 11).
 - Weight rule: Figma 510 always renders as **500**. Weights in use: 400, 500, 600, 700.
@@ -236,7 +236,7 @@ Component mapping:
 - Settings cards, message bubbles, guide entries: R20. Modal dialog: R28 (width min(380px,100%), `Modal.module.css`).
 - Composer statistics / context-occupancy trigger: R8.
 - Nested: concentric inner R = max(0, outer R − inset) (e.g. R16 − 4 = R12). A separate card inside a surface picks its own tier, not subtraction. Flush children inside a clipping parent use R0; edge-docked surfaces R0 on shared edges.
-- **Superellipse**: all rounded corners use `corner-shape: superellipse(1.5)` (between circle=1 and squircle=2) where supported. Android: approximate with a custom `Shape` (e.g. a smoothed/“squircle” `RoundedCornerShape` path, or androidx.graphics.shapes `RoundedPolygon` with smoothing ~0.6); plain `RoundedCornerShape` is the acceptable fallback (that is what non-supporting browsers render).
+- **Superellipse**: all rounded corners use `corner-shape: superellipse(1.5)` (between circle=1 and squircle=2) where supported. Android: approximate with a custom `Shape` (e.g. a smoothed/“squircle” `RoundedCornerShape` path, or androidx.graphics.shapes `RoundedPolygon` with smoothing ~0.6); the app uses plain `RoundedCornerShape` (what non-supporting browsers render).
 - **Capsules/circles**: avatars, status dots = 50%; pills/full-round tracks = 999px; these must keep circular arcs (`corner-shape: round`) -> `CircleShape` / `RoundedCornerShape(50)`. Don't make small buttons capsules just because they're short. `Pill` and `Tag` primitives are capsules.
 
 ---
@@ -285,7 +285,7 @@ Reduced motion: every animated primitive has `@media (prefers-reduced-motion: re
 
 **Spacing**: no spacing token scale exists; components use literal px on a 2/4px grid. Common values: 2, 4 (menu padding, segmented inset, button icon gap), 6/8 (menu item padding 6×8), 10 (sm button h-padding), 14 (md button h-padding), 20 (dialog gap), 24 (modal viewport padding, hover-card side inset). Suggested Android scale: 2, 4, 6, 8, 12, 16, 20, 24 dp. Control heights: 20 (switch, 36×20), 24 (DisclosureRow), 28, 32, 34 (menu item min), 36, 42.
 
-**Icons**: no third-party icon library (no lucide/heroicons/etc. in package.json). Custom in-house SVG sprite in `packages/client/ui-primitives/src/icons/` (`ICON_SYMBOLS`, ids like `dsw-icon-search-outline-regular`), rendered via `<use>` with `currentColor`. Each glyph in two weights: `Regular` = 1px stroke, `Medium` = 1.3px stroke (same geometry); common sizes 14/16px; `FileTypeIcon` 28px; plugin/guide artwork 36×36 fixed palette; `FishLogo`, `BrandWordmark` brand marks; `LinkIconMedium` 14px site/category glyphs. Android: export the sprite symbols to VectorDrawables (keep both stroke weights) rather than substituting Material Symbols.
+**Icons**: no third-party icon library (no lucide/heroicons/etc. in package.json). Custom in-house SVG sprite in `packages/client/ui-primitives/src/icons/` (`ICON_SYMBOLS`, ids like `dsw-icon-search-outline-regular`), rendered via `<use>` with `currentColor`. Each glyph in two weights: `Regular` = 1px stroke, `Medium` = 1.3px stroke (same geometry); common sizes 14/16px; `FileTypeIcon` 28px; plugin/guide artwork 36×36 fixed palette; `FishLogo`, `BrandWordmark` brand marks; `LinkIconMedium` 14px site/category glyphs. Android: the sprite symbols are exported to `dsw_*` VectorDrawables (`tools/ui/icons.py`) rather than substituted with Material Symbols.
 
 ---
 
@@ -342,7 +342,9 @@ Conventions (`docs/web-styling.md`, `docs/ui-radius.md`):
 
 ---
 
-## 8. Compose / Material 3 mapping (proposal)
+## 8. Compose / Material 3 mapping
+
+As implemented: `Color.kt` (`DshColors`, `schemeOf`), `Theme.kt` (`DshType`, M3 `Typography`, `Radius`, `Hairline`, reduced motion), `Primitives.kt`. Dynamic color is off.
 
 **ColorScheme** (Light / Dark)
 
@@ -375,7 +377,7 @@ Conventions (`docs/web-styling.md`, `docs/ui-radius.md`):
 | scrim | bg-mask-1 | #000000 @24% | #000000 @50% |
 | surfaceTint | (disable tonal elevation) | Transparent | Transparent |
 
-Keep an extended `DshColors` (CompositionLocal) for what M3 lacks: labelTertiary, labelCaption, link, success/successContainer (#22C55E / #E6FAED|#233C2C), warn/warnLabel/warnContainer, idle, interactiveHover/Pressed overlays, borderL1–L4, bubble, sidebar, menu fill, code block, diff colors, selection (#3B82F6 @40% -> `TextSelectionColors`).
+An extended `DshColors` (CompositionLocal `LocalDshColors`) holds what M3 lacks: labelTertiary, labelCaption, link, success/successContainer (#22C55E / #E6FAED|#233C2C), warn/warnLabel/warnContainer, idle, interactiveHover/Pressed overlays, borderL1–L4, bubble, sidebar, menu fill, code block, diff colors, selection (#3B82F6 @40% -> `TextSelectionColors`).
 
 **Typography** (Typography roles, system font family; weights 400/500/600/700)
 
@@ -391,10 +393,10 @@ Keep an extended `DshColors` (CompositionLocal) for what M3 lacks: labelTertiary
 | labelLarge | s-strong-14 (14/22, 500) — md button |
 | labelMedium | xxs-strong-12 (12/18, 500) — sm button |
 | labelSmall | xxxs-strong-11 (11/14, 500) |
-Plus a separate `DshMarkdownTypography` (h1–h4, base, table, small, code 12/19, codeBlock 11/19 mono), scaled by user content/code size.
+Plus markdown/code styles (h1–h4, base, table, small, code 12/19, codeBlock 11/19 mono).
 
-**Shapes**: extraSmall = 4dp, small = 8dp, medium = 12dp, large = 16dp, extraLarge = 28dp (panel/dialog/composer/bottom sheet); add custom `card = 20dp` (settings cards, bubbles) and `tile = 10dp`. Use `CircleShape` for avatars/dots/pills/tags. Optionally wrap in a superellipse(1.5) shape for parity.
+**Shapes** (`Radius`): extraSmall = 4dp, small = 8dp, medium = 12dp, large = 16dp, extraLarge = 28dp (panel/dialog/composer/bottom sheet); plus `xl = 20dp` (settings cards, bubbles) and `tile = 10dp`. `CircleShape` for avatars/dots/pills/tags. No superellipse.
 
-**Elevation**: use tonal elevation 0 and draw a 0.5dp (≈1 physical px: `Dp.Hairline` or `1.dp / density`) `outline` border plus a very soft shadow (≈2–3dp, alpha 3–5%) for menus/dialogs/composer; flat cards: 0.5dp `outline` border, no shadow.
+**Elevation**: tonal elevation 0; a `Hairline` (0.5dp) `outline` border plus a very soft shadow (≈2–3dp, alpha 3–5%) for menus/dialogs/composer; flat cards: 0.5dp `outline` border, no shadow.
 
 **Motion**: `tween(200, easing = FastOutSlowInEasing)` default; fast 100ms, slow 300ms.

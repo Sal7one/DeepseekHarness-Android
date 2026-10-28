@@ -38,25 +38,27 @@ Environment (set with `Os.setenv` before start):
 | `TZ`, `DSH_ANDROID_TZ` | the device's IANA zone (`TimeZone.getDefault().id`, e.g. `Asia/Shanghai`). Node's ICU finds no zone on Android otherwise (UTC). `android-env.cjs` assigns `process.env.TZ` from `DSH_ANDROID_TZ` when the resolved zone differs, which resets ICU; drives the time context (patch 11), budget day rollover and log times. A zone change needs an engine restart. |
 | `NODE_EXTRA_CA_CERTS` | `<filesDir>/certs/android-ca.pem`: `AndroidCAStore` (system minus user-disabled, plus user-installed CAs), re-exported when its digest changes |
 | `NODE_COMPILE_CACHE` | `<cacheDir>/node-compile-cache` (V8 code cache) |
-| `NODE_OPTIONS` | composed only in `EngineRuntimeEnv` (app options + runtime options, de-duplicated) |
+| `NODE_OPTIONS` | `--max-old-space-size=768`; composed only in `EngineRuntimeEnv` (app options + runtime options, de-duplicated) |
+| `DSH_TELEMETRY_DISABLED` | `1` |
 
-`ENGINE_DIR` = `<filesDir>/engine/<engineVersion>/`, unpacked from the APK asset `engine.zip` (flat tree, **no symlinks**) on first start of a new version; `engine.sha256` guards integrity.
+`ENGINE_DIR` = `<filesDir>/engine/<first 16 hex chars of engine.sha256>/`, unpacked from the APK asset `engine.zip` (flat tree, **no symlinks**) when its `.installed` marker is missing; other version directories are deleted. The hash only keys the directory; it is not re-verified on the device (the APK signature covers the asset).
 
 ## 2. SDK channel (stdin/stdout)
 
-Unmodified dsh SDK JSON-RPC 2.0, newline-delimited (`packages/sdk/protocol`). The app is the client (notifications are handled strictly in wire order). dsh notifies `session.event`s before they are
-durable: after an `:engine` crash the resumed session re-issues seqs the dead process had already sent, so the app logs
-each engine generation's events at an offset past its log (`LogSeqs`), never treating a seq as a cross-generation identity.
-The app is the client:
+Unmodified dsh SDK JSON-RPC 2.0, newline-delimited (`packages/sdk/protocol`). The app is the client and handles
+notifications strictly in wire order. dsh notifies `session.event`s before they are durable: after an `:engine` crash
+the resumed session re-issues seqs the dead process had already sent, so the app logs each engine generation's events at
+an offset past its log (`LogSeqs`), never treating a seq as a cross-generation identity.
 
-- `initialize { cwd: HOME, provider, model, approvalRequests: true, capabilities: { userQuestions: true } }` —
+- `initialize { cwd: HOME, provider, model, reasoningEffort, approvalRequests: true, capabilities: { userQuestions: true } }` —
   `provider` is `deepseek-official` when an API key is set, else `deepseek-account` when a DeepSeek account is signed in
   (dsh's `initializeDefaultModel` precedence: the account route only without a key), else `deepseek-official` (the engine
   still starts so the user can sign in; the app refuses prompts with "当前模型暂不可用，请登录后再试"). The app reads
-  `account/state` before `initialize`. A route change re-sends `initialize` while no SDK session is open in the process
-  (patch-free: the server just replaces its route), otherwise restarts the idle engine.
-- `session/prompt`, `session/resume`, `session/wait`, `shutdown`. `session/prompt` also accepts an optional
-  `clientTimeZone` (IANA); without it the engine uses its process `TZ` (patch 11). Each request carries a
+  `account/state` before `initialize`. A route change (provider, model or effort) re-sends `initialize` while no SDK
+  session is open in the process (patch-free: the server just replaces its route), otherwise restarts the idle engine.
+- `session/prompt`, `session/resume`, `shutdown`. There is no per-session cancel: stopping a run stops the engine.
+  `session/prompt` also accepts an optional `clientTimeZone` (IANA); the app does not send it, so the engine uses its
+  process `TZ` (patch 11). Each request carries a
   `dsh-time-context` reading (date, time, zone, elapsed time) so relative requests ("tomorrow 7:00") resolve.
 - `android/session/permission { sessionId, preset: 'read-only' | 'workspace-write' | 'danger-full-access' | null }` → `{}`
   (plugin-guard, through patch 10). **The app sends it before each `session/prompt` and whenever the user changes the
@@ -70,6 +72,10 @@ The app is the client:
   every mode; `write`/`edit` inside `HOME`/`TMPDIR` run without asking unless the mode is 仅可查看 or unknown; a
   `sensitive` device tool asks once per conversation (after one `allowed-once`, later calls of that tool in the same
   root session run directly; the `reason` says so). `dangerous` tools always ask.
+- What reaches the app is answered by the conversation's mode (`SessionStore.approve`): `read-only` rejects,
+  `danger-full-access` allows everything but `dangerous`, `workspace-write` shows a card (允许一次 / 本会话允许 / 拒绝).
+  本会话允许 is app-side: later requests for that tool in the same root session are answered `allowed-once` without a
+  card. `dangerous` tools always show a card.
 - Unattended (`auto_…`) sessions: the model gets a runtime-context note (nobody is watching, only the rule's tools run,
   unlock-waiting tools listed from metadata, finish with a notification-sized result); `user-question/ask` is never sent
   for them — plugin-guard answers "nobody is available" itself. No engine-side auto-allow of writes there.
@@ -181,7 +187,8 @@ later, or send an SMS twice after a retry). The rules:
 
 ### App → Node notifications
 - `capability/changed {}` — tool set changed (tool groups toggled); the plugin re-lists.
-- `budget/update { sessionTokenLimit?: number, dailyTokenLimit?: number, dailyCostLimitCny?: number }`. Token limits
+- `budget/update { sessionTokenLimit?: number, dailyTokenLimit?: number, dailyCostLimitCny?: number }`, sent after each
+  engine start (the app currently sets only the two token limits; a limit of 0 is omitted). Token limits
   are metered **input-equivalent**: uncached input + cache writes + output, plus cache reads weighted by their price
   ratio (cacheRead / input = 0.1 by default). The cached prompt prefix (~13k tokens with all device groups) is re-read on
   every step; counting it at full weight made a 10-step task look like ~130k tokens. The cost limit uses real prices.

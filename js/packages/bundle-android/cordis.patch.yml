@@ -106,6 +106,6 @@
       name: '@dsh-android/plugin-account'
       config:
         locale: !!js "process.env.DSH_ANDROID_LOCALE || ''"
-        # The completion page in the Custom Tab opens this app link.
+        # The completion page in the in-app sign-in WebView opens this app link.
         appScheme: dsh-android
         appPackage: !!js "process.env.DSH_ANDROID_PACKAGE || ''"

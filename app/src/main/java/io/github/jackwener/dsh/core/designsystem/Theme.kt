@@ -28,7 +28,7 @@ import io.github.jackwener.dsh.core.data.ThemeMode
 private fun style(size: Int, line: Int, weight: Int = 400, family: FontFamily = FontFamily.Default) =
     TextStyle(fontSize = size.sp, lineHeight = line.sp, fontWeight = FontWeight(weight), fontFamily = family)
 
-/** dsh `--dsw-font-*` scale plus the markdown/code tokens (dsh-design-tokens.md §2). */
+/** dsh `--dsw-font-*` scale plus the markdown/code tokens (docs/design-tokens.md). */
 object DshType {
     val xl24 = style(24, 32, 600)
     val l20 = style(20, 28, 500)

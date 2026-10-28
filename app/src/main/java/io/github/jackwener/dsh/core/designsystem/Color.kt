@@ -6,7 +6,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
-// Ported from DeepSeek Harness ui-theme design-platform.css (projects/dsh-android/dsh-design-tokens.md §1, §8).
+// Ported from DeepSeek Harness ui-theme design-platform.css (docs/design-tokens.md).
 
 /** The DSH alias palette. Feature code reads these through [Dsh.colors]; M3 roles are derived from them. */
 @Immutable

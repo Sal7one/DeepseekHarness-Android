@@ -3,7 +3,7 @@ package io.github.jackwener.dsh.core.engine
 import android.os.SystemClock
 
 /**
- * Crash-loop protection for the `:engine` process (DESIGN §3.1, AC8): exponential backoff
+ * Crash-loop protection for the `:engine` process (docs/ARCHITECTURE.md): exponential backoff
  * (1 s, 2 s, 4 s) between automatic restarts and a circuit breaker that opens after [MAX_FAILURES]
  * unexpected exits or start failures within [WINDOW_MS] with no stable run in between.
  *
