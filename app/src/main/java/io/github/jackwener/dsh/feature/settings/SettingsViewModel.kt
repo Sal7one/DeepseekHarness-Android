@@ -8,7 +8,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import io.github.jackwener.dsh.core.data.BusySend
+import io.github.jackwener.dsh.core.data.Effort
 import io.github.jackwener.dsh.core.data.SecretStore
+import io.github.jackwener.dsh.core.data.ThemeMode
+import io.github.jackwener.dsh.core.data.WorkDetails
+import io.github.jackwener.dsh.core.model.PermissionPreset
 import io.github.jackwener.dsh.core.data.Settings as DshSettings
 import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.data.UsageDao
@@ -34,7 +39,7 @@ data class DoctorCheck(val title: String, val ok: Boolean?, val detail: String, 
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    @ApplicationContext private val context: Context,
+    @ApplicationContext val context: Context,
     private val repo: SettingsRepository,
     private val secrets: SecretStore,
     private val engine: EngineManager,
@@ -48,10 +53,21 @@ class SettingsViewModel @Inject constructor(
     val keyStatus = MutableStateFlow<String?>(null)
 
     val hasKey get() = secrets.read() != null
+    val hasKeyFlow = MutableStateFlow(secrets.read() != null)
+    fun clearKey() = viewModelScope.launch { secrets.clear(); hasKeyFlow.value = false; engine.stop() }
     val maskedKey get() = secrets.read()?.let { it.take(5) + "…" + it.takeLast(4) }
 
     fun setGroup(g: ToolGroup, on: Boolean) = viewModelScope.launch { repo.setGroupEnabled(g, on) }
-    fun setModel(m: String) = viewModelScope.launch { repo.setModel(m); engine.stop() }
+    fun setModel(m: String) = viewModelScope.launch { repo.setModel(m) }
+    fun setEffort(e: Effort) = viewModelScope.launch { repo.setEffort(e) }
+    fun setTheme(t: ThemeMode) = viewModelScope.launch { repo.setTheme(t) }
+    fun setWorkDetails(w: WorkDetails) = viewModelScope.launch { repo.setWorkDetails(w) }
+    fun setBusySend(b: BusySend) = viewModelScope.launch { repo.setBusySend(b) }
+    fun setDefaultPreset(p: PermissionPreset) = viewModelScope.launch { repo.setDefaultPreset(p) }
+    fun restartEngine() = viewModelScope.launch { engine.stop() }
+    val engineLog: String? get() = File(context.cacheDir, "engine.log").takeIf { it.exists() && it.length() > 0 }?.readText()?.takeLast(4000)
+    /** Bumped on resume so permission rows re-check their status. */
+    val permissionTick = MutableStateFlow(0)
     fun setBall(on: Boolean) = viewModelScope.launch { repo.setFloatingBall(on); FloatingBallService.setEnabled(context, on) }
     fun setLimits(daily: Long, session: Long) = viewModelScope.launch { repo.setLimits(daily, session) }
     fun toggleNotificationApp(pkg: String) = viewModelScope.launch {
@@ -64,7 +80,7 @@ class SettingsViewModel @Inject constructor(
         keyStatus.value = "checking"
         val err = validateKey(key.trim())
         keyStatus.value = err
-        if (err == null) { secrets.write(key.trim()); engine.stop() }
+        if (err == null) { secrets.write(key.trim()); hasKeyFlow.value = true; engine.stop() }
         return err
     }
 
@@ -86,15 +102,13 @@ class SettingsViewModel @Inject constructor(
                    !shizuku.running -> if (zh) "已安装但未启动" else "Installed, not running"
                    !shizuku.granted -> if (zh) "未授权" else "Not authorized"
                    else -> if (zh) "可用" else "Ready" })
-        checks += DoctorCheck(if (zh) "API key" else "API key", hasKey, maskedKey ?: "-")
+        checks += DoctorCheck("API key", hasKey, maskedKey ?: "-")
         val engineDetail = when (val s = engine.state.value) {
             EngineState.Ready -> (if (zh) "运行中，启动用时 " else "Running, started in ") + "${engine.startupMillis} ms"
             is EngineState.Failed -> s.message
             else -> if (zh) "空闲（按需启动）" else "Idle (starts on demand)"
         }
         checks += DoctorCheck(if (zh) "Agent 引擎" else "Agent engine", engine.state.value !is EngineState.Failed, engineDetail)
-        val log = File(context.cacheDir, "engine.log")
-        if (log.exists() && log.length() > 0) checks += DoctorCheck(if (zh) "引擎日志" else "Engine log", null, log.readText().takeLast(1500))
         checks += DoctorCheck(if (zh) "存储空间" else "Storage", (context.filesDir.usableSpace > 500_000_000L),
             "${context.filesDir.usableSpace / 1_000_000} MB free")
         doctor.value = checks

@@ -95,6 +95,8 @@ object PermissionCatalog {
 
     fun forGroups(groups: Set<ToolGroup>) = all.filter { it.groups.any(groups::contains) }
 
+    fun byId(id: String) = all.firstOrNull { it.id == id }
+
     private fun a11yEnabled(c: Context): Boolean {
         val flat = Settings.Secure.getString(c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
         return flat.contains(ComponentName(c, DshAccessibilityService::class.java).flattenToString())

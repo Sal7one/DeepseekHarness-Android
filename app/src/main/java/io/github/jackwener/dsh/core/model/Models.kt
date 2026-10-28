@@ -12,12 +12,14 @@ enum class ToolGroup(val id: String) {
     companion object { fun of(id: String) = entries.firstOrNull { it.id == id } }
 }
 
-/** What the user chose during onboarding ("what should it do for you"). */
-enum class UseCase(val groups: Set<ToolGroup>) {
-    ManageFiles(setOf(ToolGroup.Files)),
-    OperateApps(setOf(ToolGroup.Apps, ToolGroup.Screen, ToolGroup.Browser)),
-    Automate(setOf(ToolGroup.Rules, ToolGroup.System, ToolGroup.Media)),
-    ReadNotifications(setOf(ToolGroup.Notifications)),
+/**
+ * dsh permission presets (ui-permission-presets), mapped onto the app's approval gate:
+ * read-only refuses every action that needs approval, ask (dsh "workspace-write", the default)
+ * asks for each one, full access approves everything except `dangerous` device tools.
+ */
+enum class PermissionPreset(val id: String) {
+    ReadOnly("read-only"), Ask("workspace-write"), Full("danger-full-access");
+    companion object { fun of(id: String?) = entries.firstOrNull { it.id == id } ?: Ask }
 }
 
 const val AUTO_SESSION_PREFIX = "auto_"

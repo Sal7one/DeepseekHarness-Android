@@ -102,7 +102,7 @@ class CapabilityHub @Inject constructor(
         val tool = allTools[name] ?: return ToolResult.error("invalid_args", "unknown tool $name")
         val group = ToolGroup.of(tool.descriptor.group)
         if (group !in settings.current().enabledGroups) return ToolResult.error("not_authorized",
-            "The '${tool.descriptor.group}' capability is turned off. Ask the user to enable it in DSH → Me → Capabilities.")
+            "The '${tool.descriptor.group}' capability is turned off. Ask the user to enable it in DSH → Settings → Agent.")
         val ruleId = ruleIdOfSession(sessionId)
         if (ruleId != null) {
             val spec = rules.get(ruleId)?.let { RpcJson.decodeFromString(RuleSpec.serializer(), it.specJson) }
@@ -117,10 +117,21 @@ class CapabilityHub @Inject constructor(
             if (sessionId.isNotEmpty()) sessions.get().setWaitingForUnlock(sessionId, false)
             if (!unlocked) return ToolResult.error("device_locked_timeout", "The phone stayed locked; this step needs an unlocked screen.")
         }
+        val call = CallContext(sessionId, callId, unattended = ruleId != null)
         return try {
-            tool.invoke(args, CallContext(sessionId, callId, unattended = ruleId != null))
-        } catch (e: PermissionMissingException) {
-            ToolResult.error("permission_missing", "Missing permission: ${e.what}. Ask the user to grant it in DSH → Me → Permissions.")
+            var attempt = 0
+            var result: ToolResult? = null
+            while (result == null) {
+                try {
+                    result = tool.invoke(args, call)
+                } catch (e: PermissionMissingException) {
+                    // Attended sessions get a just-in-time permission card in the composer slot; the call
+                    // waits there and is retried once the user comes back from the system settings page.
+                    if (call.unattended || sessionId.isEmpty() || attempt++ >= 3 || !sessions.get().requestPermission(sessionId, name, e.what))
+                        return ToolResult.error("permission_missing", "Missing permission: ${e.what}. The user declined to grant it; continue without this capability or explain what is needed.")
+                }
+            }
+            result.also { r -> ShotStore.save(context, sessionId, callId, r.content.filterIsInstance<Content.Image>()) }
         } catch (e: InvalidArgsException) {
             ToolResult.error("invalid_args", e.message ?: "invalid arguments")
         } catch (e: Exception) {

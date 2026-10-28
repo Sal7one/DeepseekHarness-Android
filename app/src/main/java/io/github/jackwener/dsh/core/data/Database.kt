@@ -28,11 +28,22 @@ data class SessionEntity(
     val updatedAt: Long,
     val ruleId: Long? = null,
     val running: Boolean = false,
+    /** Subagent sessions point at the session that spawned them; hidden from the sidebar. */
+    val parentId: String? = null,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    /** A turn finished while the user was not looking at this session. */
+    val unread: Boolean = false,
+    /** PermissionPreset id; null = the default from settings. */
+    val preset: String? = null,
 )
 
-/** Raw dsh `session.event` payloads, replayed to rebuild a conversation. */
+/**
+ * Raw dsh `session.event` payloads plus app-local records (type `app/...`, negative seq), in
+ * arrival order. Both the conversation and the trajectory view are projections of this log.
+ */
 @Entity(tableName = "events", primaryKeys = ["sessionId", "seq"])
-data class EventEntity(val sessionId: String, val seq: Long, val type: String, val json: String)
+data class EventEntity(val sessionId: String, val seq: Long, val type: String, val json: String, val time: Long = 0)
 
 @Entity(tableName = "rules")
 data class RuleEntity(
@@ -57,8 +68,20 @@ data class UsageEntity(@PrimaryKey val day: String, val inputTokens: Long, val o
 
 @Dao
 interface SessionDao {
-    @Query("SELECT * FROM sessions WHERE ruleId IS NULL ORDER BY updatedAt DESC")
+    @Query("SELECT * FROM sessions WHERE ruleId IS NULL AND parentId IS NULL ORDER BY pinned DESC, updatedAt DESC")
     fun observeAttended(): Flow<List<SessionEntity>>
+    @Query("SELECT * FROM sessions WHERE id = :id")
+    fun observe(id: String): Flow<SessionEntity?>
+    @Query("SELECT * FROM sessions WHERE parentId = :id")
+    suspend fun children(id: String): List<SessionEntity>
+    @Query("UPDATE sessions SET pinned = :pinned WHERE id = :id")
+    suspend fun setPinned(id: String, pinned: Boolean)
+    @Query("UPDATE sessions SET archived = :archived WHERE id = :id")
+    suspend fun setArchived(id: String, archived: Boolean)
+    @Query("UPDATE sessions SET unread = :unread WHERE id = :id")
+    suspend fun setUnread(id: String, unread: Boolean)
+    @Query("UPDATE sessions SET preset = :preset WHERE id = :id")
+    suspend fun setPreset(id: String, preset: String?)
     @Query("SELECT * FROM sessions WHERE id = :id")
     suspend fun get(id: String): SessionEntity?
     @Query("SELECT * FROM sessions WHERE running = 1")
@@ -72,7 +95,7 @@ interface SessionDao {
     suspend fun delete(id: String)
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertEvent(e: EventEntity)
-    @Query("SELECT * FROM events WHERE sessionId = :id ORDER BY seq")
+    @Query("SELECT * FROM events WHERE sessionId = :id ORDER BY time, seq")
     suspend fun events(id: String): List<EventEntity>
     @Query("DELETE FROM events WHERE sessionId = :id")
     suspend fun deleteEvents(id: String)
@@ -86,6 +109,8 @@ interface RuleDao {
     suspend fun all(): List<RuleEntity>
     @Query("SELECT * FROM rules WHERE id = :id")
     suspend fun get(id: Long): RuleEntity?
+    @Query("SELECT * FROM rules WHERE id = :id")
+    fun observeOne(id: Long): Flow<RuleEntity?>
     @Insert suspend fun insert(r: RuleEntity): Long
     @Upsert suspend fun upsert(r: RuleEntity)
     @Query("DELETE FROM rules WHERE id = :id")
@@ -106,7 +131,7 @@ interface UsageDao {
     @Upsert suspend fun upsert(u: UsageEntity)
 }
 
-@Database(entities = [SessionEntity::class, EventEntity::class, RuleEntity::class, RuleRunEntity::class, UsageEntity::class], version = 1)
+@Database(entities = [SessionEntity::class, EventEntity::class, RuleEntity::class, RuleRunEntity::class, UsageEntity::class], version = 2)
 abstract class DshDatabase : RoomDatabase() {
     abstract fun sessions(): SessionDao
     abstract fun rules(): RuleDao
@@ -117,7 +142,7 @@ abstract class DshDatabase : RoomDatabase() {
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
     @Provides @Singleton
-    fun db(@ApplicationContext c: Context): DshDatabase = Room.databaseBuilder(c, DshDatabase::class.java, "dsh.db").build()
+    fun db(@ApplicationContext c: Context): DshDatabase = Room.databaseBuilder(c, DshDatabase::class.java, "dsh.db").fallbackToDestructiveMigration(true).build()
     @Provides fun sessions(db: DshDatabase) = db.sessions()
     @Provides fun rules(db: DshDatabase) = db.rules()
     @Provides fun usage(db: DshDatabase) = db.usage()

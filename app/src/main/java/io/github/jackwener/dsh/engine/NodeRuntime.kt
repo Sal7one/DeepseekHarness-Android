@@ -2,7 +2,7 @@ package io.github.jackwener.dsh.engine
 
 // Package must match the JNI symbol exported by native/engine-jni/dshengine.cc.
 
-/** JNI entry into libdshengine.so, which calls node::Start on the given fds. */
+/** JNI entry into libdshengine.so, which calls node::Start on the given fds. `args` excludes argv[0]. */
 object NodeRuntime {
     init {
         System.loadLibrary("c++_shared")

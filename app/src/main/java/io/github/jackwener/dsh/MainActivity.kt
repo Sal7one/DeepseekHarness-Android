@@ -5,30 +5,23 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -36,31 +29,35 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
+import io.github.jackwener.dsh.core.data.SecretStore
 import io.github.jackwener.dsh.core.data.SettingsRepository
+import io.github.jackwener.dsh.core.data.ThemeMode
+import io.github.jackwener.dsh.core.designsystem.Dsh
 import io.github.jackwener.dsh.core.designsystem.DshTheme
 import io.github.jackwener.dsh.feature.automation.AutomationScreen
-import io.github.jackwener.dsh.feature.chat.ChatsScreen
-import io.github.jackwener.dsh.feature.chat.ConversationScreen
-import io.github.jackwener.dsh.feature.onboarding.OnboardingScreen
-import io.github.jackwener.dsh.feature.settings.DoctorScreen
-import io.github.jackwener.dsh.feature.settings.KeyScreen
-import io.github.jackwener.dsh.feature.settings.MeScreen
+import io.github.jackwener.dsh.feature.automation.RuleDetailScreen
+import io.github.jackwener.dsh.feature.conversation.HomeScreen
+import io.github.jackwener.dsh.feature.conversation.HomeViewModel
+import io.github.jackwener.dsh.feature.settings.KeyOnboarding
 import io.github.jackwener.dsh.feature.settings.NotificationAppsScreen
-import io.github.jackwener.dsh.feature.settings.PermissionsScreen
-import io.github.jackwener.dsh.feature.settings.UsageScreen
+import io.github.jackwener.dsh.feature.settings.SettingsScreen
+import io.github.jackwener.dsh.feature.settings.SettingsSection
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import java.net.URLDecoder
-import java.net.URLEncoder
 import javax.inject.Inject
 
 @HiltViewModel
-class MainViewModel @Inject constructor(settings: SettingsRepository) : ViewModel() {
-    /** null = still loading. */
-    val onboarded = settings.settings.map { it.onboarded }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+class MainViewModel @Inject constructor(settings: SettingsRepository, secrets: SecretStore) : ViewModel() {
+    /** null = still loading (keeps the splash up). */
+    val theme = settings.settings.map { it.theme }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val hasKey = secrets.read() != null
 }
 
+/**
+ * The app opens straight into the conversation (dsh home). Onboarding is only the API key when
+ * it is missing; everything else (Android permissions) is asked just in time from the composer slot.
+ */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private var pendingSession by mutableStateOf<String?>(null)
@@ -72,9 +69,11 @@ class MainActivity : ComponentActivity() {
         pendingSession = intent.getStringExtra(EXTRA_SESSION)
         setContent {
             val vm: MainViewModel = hiltViewModel()
-            val onboarded by vm.onboarded.collectAsStateWithLifecycle()
-            splash.setKeepOnScreenCondition { onboarded == null }
-            DshTheme { onboarded?.let { AppNav(it) } }
+            val theme by vm.theme.collectAsStateWithLifecycle()
+            splash.setKeepOnScreenCondition { theme == null }
+            DshTheme(theme ?: ThemeMode.System) {
+                Box(Modifier.fillMaxSize().background(Dsh.colors.bgBase)) { if (theme != null) AppNav(vm.hasKey) }
+            }
         }
     }
 
@@ -84,50 +83,31 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AppNav(onboarded: Boolean) {
+    private fun AppNav(hasKey: Boolean) {
         val nav = rememberNavController()
-        LaunchedEffect(pendingSession) { pendingSession?.let { nav.navigate("chat/$it"); pendingSession = null } }
-        NavHost(nav, startDestination = if (onboarded) "home" else "onboarding") {
-            composable("onboarding") {
-                OnboardingScreen(onFinished = { prompt ->
-                    nav.navigate("home") { popUpTo("onboarding") { inclusive = true } }
-                    prompt?.let { nav.navigate("chat/new?prompt=" + URLEncoder.encode(it, "UTF-8")) }
-                })
-            }
-            composable("home") { Home(nav) }
-            composable("chat/{sessionId}?prompt={prompt}", arguments = listOf(
-                navArgument("sessionId") { type = NavType.StringType },
-                navArgument("prompt") { type = NavType.StringType; nullable = true; defaultValue = null },
-            )) { entry ->
-                val prompt = entry.arguments?.getString("prompt")?.let { URLDecoder.decode(it, "UTF-8") }
-                ConversationScreen(onBack = { nav.popBackStack() }, autoSend = prompt)
-            }
-            composable("key") { KeyScreen(onBack = { nav.popBackStack() }) }
-            composable("permissions") { PermissionsScreen(onBack = { nav.popBackStack() }) }
-            composable("notif_apps") { NotificationAppsScreen(onBack = { nav.popBackStack() }) }
-            composable("usage") { UsageScreen(onBack = { nav.popBackStack() }) }
-            composable("doctor") { DoctorScreen(onBack = { nav.popBackStack() }) }
+        val home: HomeViewModel = hiltViewModel()
+        LaunchedEffect(pendingSession) {
+            pendingSession?.let { id -> home.open(id); nav.popBackStack("home", inclusive = false); pendingSession = null }
         }
-    }
-
-    @Composable
-    private fun Home(nav: NavHostController) {
-        var tab by rememberSaveable { mutableStateOf(0) }
-        Scaffold(bottomBar = {
-            NavigationBar {
-                listOf(Triple(R.string.tab_chats, Icons.Default.Home, 0), Triple(R.string.tab_automation, Icons.Default.PlayArrow, 1),
-                    Triple(R.string.tab_me, Icons.Default.Person, 2)).forEach { (label, icon, i) ->
-                    NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(icon, null) }, label = { Text(stringResource(label)) })
-                }
+        val start = remember { if (hasKey) "home" else "key" }
+        NavHost(nav, startDestination = start, enterTransition = { fadeIn() }, exitTransition = { fadeOut() }) {
+            composable("key") { KeyOnboarding(onDone = { nav.navigate("home") { popUpTo("key") { inclusive = true } } }) }
+            composable("home") {
+                HomeScreen(home,
+                    onSettings = { section -> nav.navigate("settings?section=${section ?: ""}") },
+                    onAutomation = { nav.navigate("automation") })
             }
-        }) { pad ->
-            val m = Modifier.padding(bottom = pad.calculateBottomPadding())
-            androidx.compose.foundation.layout.Box(m) {
-                when (tab) {
-                    0 -> ChatsScreen(onOpen = { nav.navigate("chat/$it") })
-                    1 -> AutomationScreen(onCreateViaChat = { nav.navigate("chat/new?prompt=" + URLEncoder.encode(it, "UTF-8")) })
-                    else -> MeScreen(onNavigate = { nav.navigate(it) })
-                }
+            composable("settings?section={section}", arguments = listOf(navArgument("section") { type = NavType.StringType; defaultValue = "" })) { e ->
+                SettingsScreen(SettingsSection.of(e.arguments?.getString("section")), onBack = { nav.popBackStack() }, onNotificationApps = { nav.navigate("notif_apps") })
+            }
+            composable("notif_apps") { NotificationAppsScreen(onBack = { nav.popBackStack() }) }
+            composable("automation") {
+                AutomationScreen(onBack = { nav.popBackStack() },
+                    onNew = { prefill -> home.newSession(prefill); nav.popBackStack("home", inclusive = false) },
+                    onOpenRule = { nav.navigate("rule/$it") })
+            }
+            composable("rule/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
+                RuleDetailScreen(onBack = { nav.popBackStack() }, onOpenSession = { sid -> home.open(sid); nav.popBackStack("home", inclusive = false) })
             }
         }
     }

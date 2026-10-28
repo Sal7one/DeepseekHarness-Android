@@ -7,56 +7,57 @@ import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Text
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dagger.hilt.android.AndroidEntryPoint
-import dagger.hilt.android.lifecycle.HiltViewModel
 import io.github.jackwener.dsh.MainActivity
 import io.github.jackwener.dsh.R
+import io.github.jackwener.dsh.core.data.ThemeMode
+import io.github.jackwener.dsh.core.designsystem.DIcon
+import io.github.jackwener.dsh.core.designsystem.Dsh
 import io.github.jackwener.dsh.core.designsystem.DshTheme
-import io.github.jackwener.dsh.core.engine.EngineManager
-import io.github.jackwener.dsh.core.session.SessionStore
-import io.github.jackwener.dsh.feature.chat.Composer
-import io.github.jackwener.dsh.feature.chat.ConversationController
-import io.github.jackwener.dsh.feature.chat.MessageList
-import javax.inject.Inject
-
-@HiltViewModel
-class QuickViewModel @Inject constructor(store: SessionStore, engine: EngineManager) : ConversationController(store, engine, null)
+import io.github.jackwener.dsh.core.designsystem.DshType
+import io.github.jackwener.dsh.core.designsystem.IconBtn
+import io.github.jackwener.dsh.core.designsystem.Radius
+import io.github.jackwener.dsh.core.designsystem.Whale
+import io.github.jackwener.dsh.core.designsystem.elevated
+import io.github.jackwener.dsh.core.designsystem.pressable
+import io.github.jackwener.dsh.feature.conversation.ChatStream
+import io.github.jackwener.dsh.feature.conversation.ComposerSlot
+import io.github.jackwener.dsh.feature.conversation.QuickViewModel
+import io.github.jackwener.dsh.feature.conversation.rememberComposerState
 
 /**
- * The summon-anywhere panel: opened by the floating button, quick-settings tile, the system
- * assistant gesture, share sheet, or other apps (RUN_TASK). Sits over the current app.
+ * The summon-anywhere panel (floating ball, QS tile, assistant gesture, share sheet, RUN_TASK):
+ * a compact dsh card with the current run's progress and the same composer slot (approval /
+ * permission / question cards replace the composer exactly as on the home screen).
  */
 @AndroidEntryPoint
 class QuickActivity : ComponentActivity() {
@@ -67,46 +68,64 @@ class QuickActivity : ComponentActivity() {
         val shared = sharedPayload(intent)
         val externalTask = intent.getStringExtra(EXTRA_TASK)?.takeIf { intent.action == ACTION_RUN_TASK }
         setContent {
-            DshTheme {
-                val vm: QuickViewModel = hiltViewModel()
-                val state by vm.state.collectAsStateWithLifecycle()
+            val vm: QuickViewModel = hiltViewModel()
+            val settings by vm.settings.collectAsStateWithLifecycle()
+            DshTheme(settings.theme) {
+                val c = Dsh.colors
+                val live by vm.live.collectAsStateWithLifecycle()
+                val conv by vm.conversation.collectAsStateWithLifecycle()
+                val composer = rememberComposerState(live.sessionId)
                 var useContext by remember { mutableStateOf(ScreenContext.text != null) }
                 var sentExternal by remember { mutableStateOf(false) }
-                if (externalTask != null && !sentExternal) { sentExternal = true; vm.send(externalTask) }
+                LaunchedEffect(externalTask) { if (externalTask != null && !sentExternal) { sentExternal = true; vm.send(externalTask) } }
+                val list = rememberLazyListState()
                 Box(Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, null) { finish() }, contentAlignment = Alignment.BottomCenter) {
-                    Surface(
-                        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier.fillMaxWidth().clickable(remember { MutableInteractionSource() }, null) {}.imePadding(),
+                    Column(
+                        Modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(8.dp)
+                            .elevated(Radius.panel, c.borderL2, 12.dp).clip(Radius.panel).background(c.bgBase)
+                            .clickable(remember { MutableInteractionSource() }, null) {}.padding(bottom = 8.dp),
                     ) {
-                        Column(Modifier.navigationBarsPadding().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                                IconButton(onClick = {
-                                    startActivity(Intent(this@QuickActivity, MainActivity::class.java).putExtra(MainActivity.EXTRA_SESSION, vm.id)
-                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); finish()
-                                }) { Icon(Icons.AutoMirrored.Filled.ExitToApp, null) }
-                                IconButton(onClick = { finish() }) { Icon(Icons.Default.Close, null) }
-                            }
-                            if (useContext && ScreenContext.packageName != null) AssistChip(onClick = { useContext = false },
-                                label = { Text(stringResource(R.string.current_page, appLabel(ScreenContext.packageName!!))) },
-                                trailingIcon = { Icon(Icons.Default.Close, null) })
-                            if (state.items.isNotEmpty() || state.running || state.approval != null)
-                                MessageList(state, Modifier.heightIn(max = 420.dp), onApprove = vm::approve, onAnswer = vm::answer)
-                            Composer(state.running, onSend = { text ->
+                        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 6.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Whale(width = 20.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(live.title.ifBlank { stringResource(R.string.app_name) }, Modifier.weight(1f), style = DshType.s14m, color = c.labelPrimary, maxLines = 1)
+                            IconBtn(R.drawable.dsw_right_up_outline, {
+                                startActivity(Intent(this@QuickActivity, MainActivity::class.java).putExtra(MainActivity.EXTRA_SESSION, vm.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                finish()
+                            }, size = 40.dp, contentDescription = stringResource(R.string.open_in_app))
+                            IconBtn(R.drawable.dsw_close_outline, { finish() }, size = 40.dp, contentDescription = stringResource(R.string.close))
+                        }
+                        if (useContext && ScreenContext.packageName != null) Row(Modifier.padding(horizontal = 16.dp, vertical = 2.dp).clip(Radius.sm).background(c.selector)
+                            .pressable({ useContext = false }, Radius.sm).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            DIcon(R.drawable.dsw_fullscreen_outline, size = 12.dp, tint = c.labelSecondary)
+                            Text(stringResource(R.string.current_page, appLabel(ScreenContext.packageName!!)), style = DshType.xxs12, color = c.labelSecondary)
+                            DIcon(R.drawable.dsw_close_outline, size = 10.dp, tint = c.labelTertiary)
+                        }
+                        if (!conv.isEmpty || live.running) {
+                            ChatStream(conv, live, settings.workDetails, list, onInspect = { open(vm.id) }, onRetry = vm::retry, onOpenSettings = { open(null) },
+                                modifier = Modifier.fillMaxWidth().heightIn(max = 380.dp), compact = true)
+                        }
+                        Box(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                            ComposerSlot(vm, composer, settings, live, conv, hero = false, prepare = { text ->
                                 val ctx = buildString {
                                     if (useContext && ScreenContext.text != null)
                                         append("[The user summoned you while looking at ${ScreenContext.packageName}. Screen content:]\n${ScreenContext.text}\n")
-                                    shared?.let { append(it) }
-                                }.ifBlank { null }
+                                    if (conv.isEmpty) shared?.let { append(it) }
+                                }
                                 useContext = false
-                                vm.send(text, ctx)
-                            }, onStop = vm::stop)
+                                if (ctx.isBlank()) text else "$ctx\n$text"
+                            })
                         }
                     }
                 }
             }
         }
+    }
+
+    private fun open(sessionId: String?) {
+        startActivity(Intent(this, MainActivity::class.java).apply { sessionId?.let { putExtra(MainActivity.EXTRA_SESSION, it) } }.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        finish()
     }
 
     private fun appLabel(pkg: String) = runCatching { packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString() }.getOrDefault(pkg)

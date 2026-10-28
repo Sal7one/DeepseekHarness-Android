@@ -28,6 +28,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -44,6 +45,7 @@ sealed interface EngineState {
 }
 
 class NoApiKeyException : Exception("DeepSeek API key not set")
+class EngineStartException(message: String, val log: String?, cause: Throwable) : Exception(message, cause)
 
 /**
  * Owns the `:engine` process from the app side: starts it on demand, wires the SDK and capability
@@ -68,14 +70,31 @@ class EngineManager @Inject constructor(
     private var idleJob: Job? = null
     var startupMillis: Long = 0; private set
 
-    /** Returns a ready SDK peer, starting the engine if needed. */
+    /** Incremented on every engine start; sessions must be resumed once per generation. */
+    @Volatile var generation: Int = 0; private set
+    private var activeConfig: Pair<String, String>? = null
+    private var death: CompletableDeferred<Unit>? = null
+    /** Generation we asked to exit; its channel closing is not a crash. */
+    @Volatile private var expectedExit = -1
+
+    /**
+     * Returns a ready SDK peer, starting the engine if needed. Model / effort are process-wide
+     * (`initialize`), so a changed selection restarts an idle engine before the next prompt.
+     */
     suspend fun sdk(): JsonRpcPeer = mutex.withLock {
-        sdk?.let { if (_state.value == EngineState.Ready) return it }
+        val st = settings.current()
+        val config = st.model to st.effort.id
+        sdk?.let { peer ->
+            if (_state.value == EngineState.Ready && (config == activeConfig || sessions.get().hasRunning())) return peer
+            Log.i(TAG, "model/effort changed: restarting engine")
+            shutdownLocked()
+        }
         val key = secrets.read() ?: throw NoApiKeyException()
         _state.value = EngineState.Starting
         val t0 = System.currentTimeMillis()
+        val gen = generation + 1
         try {
-            val service = bind()
+            val service = bind(gen)
             val handles = withContext(Dispatchers.IO) { service.start(environment(key)) }
             val sdkIn = ParcelFileDescriptor.AutoCloseOutputStream(handles.pfd("sdk_in"))
             val sdkOut = ParcelFileDescriptor.AutoCloseInputStream(handles.pfd("sdk_out"))
@@ -83,7 +102,7 @@ class EngineManager @Inject constructor(
             val peer = JsonRpcPeer("sdk", sdkOut, sdkIn, scope,
                 onRequest = { m, p -> sessions.get().onServerRequest(m, p) },
                 onNotification = { m, p -> sessions.get().onNotification(m, p) },
-                onClosed = ::onEngineGone)
+                onClosed = { onEngineGone(gen) })
             val bridgePeer = JsonRpcPeer("bridge",
                 ParcelFileDescriptor.AutoCloseInputStream(bridgeFd),
                 ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(bridgeFd.fileDescriptor)),
@@ -92,35 +111,41 @@ class EngineManager @Inject constructor(
                 onNotification = { m, p -> if (m == "budget/exceeded") sessions.get().onBudgetExceeded(p) },
                 onClosed = {})
             peer.start(); bridgePeer.start()
-            val model = settings.current().model
-            withTimeout(60_000) {
+            withTimeout(90_000) {
                 peer.request("initialize", buildJsonObject {
                     put("cwd", File(context.filesDir, "home").path)
                     put("provider", "deepseek-official")
-                    put("model", model)
+                    put("model", st.model)
+                    put("reasoningEffort", st.effort.id)
                     put("approvalRequests", true)
                     putJsonObject("capabilities") { put("userQuestions", true) }
                 })
             }
             sdk = peer; bridge = bridgePeer
+            generation = gen
+            activeConfig = config
             capabilities.get().attach(bridgePeer)
-            settings.current().let { st ->
-                bridgePeer.notify("budget/update", buildJsonObject {
-                    if (st.sessionTokenLimit > 0) put("sessionTokenLimit", st.sessionTokenLimit)
-                    if (st.dailyTokenLimit > 0) put("dailyTokenLimit", st.dailyTokenLimit)
-                })
-            }
+            bridgePeer.notify("budget/update", buildJsonObject {
+                if (st.sessionTokenLimit > 0) put("sessionTokenLimit", st.sessionTokenLimit)
+                if (st.dailyTokenLimit > 0) put("dailyTokenLimit", st.dailyTokenLimit)
+            })
             startupMillis = System.currentTimeMillis() - t0
             _state.value = EngineState.Ready
             Log.i(TAG, "engine ready in ${startupMillis}ms")
             peer
         } catch (e: Exception) {
             Log.e(TAG, "engine start failed", e)
-            _state.value = EngineState.Failed(e.message ?: e.javaClass.simpleName)
+            val detail = engineLogTail()
             teardown()
-            throw e
+            killEngineProcess()
+            _state.value = EngineState.Failed(listOfNotNull(e.message ?: e.javaClass.simpleName, detail).joinToString("\n"))
+            throw EngineStartException(e.message ?: e.javaClass.simpleName, detail, e)
         }
     }
+
+    private fun engineLogTail(): String? = runCatching {
+        File(context.cacheDir, "engine.log").takeIf { it.exists() }?.readText()?.trim()?.takeLast(600)?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     /** Called when there is no running work; stops the engine after [IDLE_MS]. */
     fun scheduleIdleShutdown() {
@@ -135,17 +160,32 @@ class EngineManager @Inject constructor(
     fun cancelIdleShutdown() { idleJob?.cancel() }
 
     /** Hard stop: the SDK has no cancel method, so stopping a turn means stopping the process. */
-    suspend fun stop() = mutex.withLock {
+    suspend fun stop() = mutex.withLock { shutdownLocked() }
+
+    /** Asks Node to exit and waits for the `:engine` process to die so the next start gets a fresh one. */
+    private suspend fun shutdownLocked() {
+        val dying = death
+        expectedExit = generation
         runCatching { withTimeout(3_000) { sdk?.request("shutdown") } }
         teardown()
+        if (dying != null && withTimeoutOrNull(5_000) { dying.await() } == null) killEngineProcess()
+    }
+
+    /** Last resort for a wedged `:engine` process (Node can start only once per process). */
+    private fun killEngineProcess() {
+        val am = context.getSystemService(android.app.ActivityManager::class.java)
+        am.runningAppProcesses?.filter { it.processName == context.packageName + ":engine" }?.forEach {
+            Log.w(TAG, "killing engine process ${it.pid}")
+            android.os.Process.killProcess(it.pid)
+        }
     }
 
     fun notifyCapabilitiesChanged() {
         scope.launch { runCatching { bridge?.notify("capability/changed") } }
     }
 
-    private fun onEngineGone() {
-        if (sdk == null) return
+    private fun onEngineGone(gen: Int) {
+        if (sdk == null || gen != generation || gen == expectedExit) return
         Log.w(TAG, "engine channel closed")
         teardown()
         scope.launch { sessions.get().onEngineLost() }
@@ -160,14 +200,15 @@ class EngineManager @Inject constructor(
         _state.value = EngineState.Stopped
     }
 
-    private suspend fun bind(): IEngineService {
+    private suspend fun bind(gen: Int): IEngineService {
         val deferred = CompletableDeferred<IEngineService>()
+        val died = CompletableDeferred<Unit>().also { death = it }
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder) {
-                binder.linkToDeath({ onEngineGone() }, 0)
+                binder.linkToDeath({ died.complete(Unit); onEngineGone(gen) }, 0)
                 deferred.complete(IEngineService.Stub.asInterface(binder))
             }
-            override fun onServiceDisconnected(name: ComponentName?) { onEngineGone() }
+            override fun onServiceDisconnected(name: ComponentName?) { died.complete(Unit); onEngineGone(gen) }
         }
         val intent = Intent(context, EngineService::class.java)
         context.startForegroundService(intent)
