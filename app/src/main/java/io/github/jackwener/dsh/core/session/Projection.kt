@@ -198,6 +198,8 @@ object Projector {
                 }
                 "turn/end" -> {
                     val t = open() ?: continue
+                    // Only the open turn's own end closes it (an end for another turn number is stale).
+                    if (t.number != null && d.i("turn") != null && d.i("turn") != t.number) continue
                     val reason = d.o("reason")
                     when (reason?.s("kind")) {
                         "completed" -> close(t, e.time, TurnStatus.Completed)
@@ -243,6 +245,7 @@ object Projector {
             when (e.type) {
                 "turn/start" -> turns += TrajTurnB(d.i("turn"), e.time)
                 "turn/end" -> cur().let { t ->
+                    if (t !== between && t.number != null && d.i("turn") != null && d.i("turn") != t.number) return@let
                     if (t !== between) t.end = e.time
                     val kind = d.o("reason")?.s("kind")
                     if (kind == "error") t.records += TrajRecord("e${e.seq}", RecordKind.Error, e.seq, d.o("reason")?.o("error")?.s("message") ?: "error",

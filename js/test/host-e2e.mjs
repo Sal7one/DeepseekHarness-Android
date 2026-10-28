@@ -15,7 +15,7 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -127,8 +127,15 @@ function rpcPeer(readable, writable, name, onRequest, onNotify) {
 function startEngine(env, extraFd, extraArgs = []) {
   const stdio = extraFd ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
   if (extraFd) env.DSH_BRIDGE_FD = '3'
-  // Same argv as EngineService: --expose-internals replaces the require-builtin native addon (patch 02).
-  const child = spawn(process.execPath, ['--expose-internals', bin, '--profile', 'android', ...extraArgs], { cwd: '/', env, stdio })
+  // Same argv as EngineService (EngineRuntimeEnv.nodeArgv): --expose-internals replaces the
+  // require-builtin native addon (patch 02); the android-env preload restores what AT_SECURE hides.
+  const preload = join(engineDir, 'node_modules/@dsh-android/bundle-android/android-env.cjs')
+  // Host processes are not AT_SECURE; simulate the phone, where os.tmpdir() ignores TMPDIR and
+  // falls back to an unwritable /tmp, so the checks below prove the preload restores it.
+  const atSecure = join(root, 'simulate-at-secure.cjs')
+  writeFileSync(atSecure, "const os = require('node:os'); os.tmpdir = () => '/nonexistent-tmp'; require('node:module').syncBuiltinESMExports()\n")
+  const pre = existsSync(preload) ? ['--require', atSecure, '--require', preload] : []
+  const child = spawn(process.execPath, ['--expose-internals', '--max-old-space-size=768', ...pre, bin, '--profile', 'android', ...extraArgs], { cwd: '/', env, stdio })
   let stderr = ''
   child.stderr.setEncoding('utf8')
   child.stderr.on('data', d => { stderr += d; for (const l of d.split('\n')) if (l.trim()) detail(`[dsh stderr] ${l}`) })
@@ -162,6 +169,9 @@ if (PHASES.has('A')) {
   const notes = (eng.stderr().match(/DSH_BRIDGE_FD is not set/g) ?? []).length
   check('A: missing bridge logged exactly once', notes === 1, `count=${notes}`)
   check('A: no fatal startup error', !/fatal|StartupError|Cannot find module/i.test(eng.stderr()))
+  check('A: android-env preload restored TMPDIR', /android-env: .*restored TMPDIR/.test(eng.stderr()))
+  check('A: spill-local activated (no tmpdir failure)', !/spill-local|dsh-spill-XXXXXX|EACCES/.test(eng.stderr()))
+  check('A: spill root created under TMPDIR', readdirSync(env.TMPDIR).some(n => n.startsWith('dsh-spill-')), readdirSync(env.TMPDIR).join(','))
 }
 
 // ── phase B: fake bridge + real model ────────────────────────────────────────

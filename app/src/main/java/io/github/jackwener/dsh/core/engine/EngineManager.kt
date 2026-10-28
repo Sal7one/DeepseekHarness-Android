@@ -85,6 +85,11 @@ class EngineManager @Inject constructor(
 
     /** Incremented on every engine start; sessions must be resumed once per generation. */
     @Volatile var generation: Int = 0; private set
+    /**
+     * Highest generation that has been torn down (stopped, crashed or failed to start). Anything a
+     * retired generation still delivers describes a process that no longer exists.
+     */
+    @Volatile var retiredGeneration: Int = 0; private set
     private var activeRoute: Route? = null
     /** Whether an SDK session was opened in this generation (then a route change needs a restart). */
     @Volatile private var sessionsOpened = false
@@ -150,13 +155,14 @@ class EngineManager @Inject constructor(
         val gen = generation + 1
         try {
             val service = bind(gen)
+            val tBound = System.currentTimeMillis()
             val handles = withContext(Dispatchers.IO) { service.start(environment(secrets.read())) }
             val sdkIn = ParcelFileDescriptor.AutoCloseOutputStream(handles.pfd("sdk_in"))
             val sdkOut = ParcelFileDescriptor.AutoCloseInputStream(handles.pfd("sdk_out"))
             val bridgeFd = handles.pfd("bridge")
             val peer = JsonRpcPeer("sdk", sdkOut, sdkIn, scope,
                 onRequest = { m, p -> sessions.get().onServerRequest(m, p) },
-                onNotification = { m, p -> if (m.startsWith("account.")) account.get().onNotification(m, p) else sessions.get().onNotification(m, p) },
+                onNotification = { m, p -> if (m.startsWith("account.")) account.get().onNotification(m, p) else sessions.get().onNotification(m, p, gen) },
                 onClosed = { onEngineGone(gen) })
             val bridgePeer = JsonRpcPeer("bridge",
                 ParcelFileDescriptor.AutoCloseInputStream(bridgeFd),
@@ -171,6 +177,7 @@ class EngineManager @Inject constructor(
             runCatching { withTimeout(90_000) { peer.request("account/state") } }
                 .onSuccess { account.get().onEngineView(it) }
                 .onFailure { Log.w(TAG, "account/state unavailable", it) }
+            val tBooted = System.currentTimeMillis()
             initialize(peer, wantedRoute(st, hasKey))
             sdk = peer; bridge = bridgePeer
             generation = gen
@@ -181,15 +188,16 @@ class EngineManager @Inject constructor(
             })
             startupMillis = System.currentTimeMillis() - t0
             _state.value = EngineState.Ready
-            Log.i(TAG, "engine ready in ${startupMillis}ms")
+            // bind = :engine process + service up (Android); boot = Node + dsh until account/state answers.
+            Log.i(TAG, "engine gen $gen ready in ${startupMillis}ms (bind ${tBound - t0}, boot ${tBooted - tBound}, initialize ${System.currentTimeMillis() - tBooted})")
             scope.launch { delay(RestartPolicy.STABLE_MS); if (generation == gen && sdk === peer) restarts.recordHealthy() }
             return peer
         } catch (e: Exception) {
             Log.e(TAG, "engine start failed", e)
-            if (e is EngineBackgroundStartException) { teardown(); throw e }
+            if (e is EngineBackgroundStartException) { teardown(gen); throw e }
             restarts.recordFailure()
             val detail = engineLogTail()
-            teardown()
+            teardown(gen)
             killEngineProcess()
             _state.value = EngineState.Failed(listOfNotNull(e.message ?: e.javaClass.simpleName, detail).joinToString("\n"))
             throw EngineStartException(e.message ?: e.javaClass.simpleName, detail, e)
@@ -220,7 +228,7 @@ class EngineManager @Inject constructor(
         val dying = death
         expectedExit = generation
         runCatching { withTimeout(3_000) { sdk?.request("shutdown") } }
-        teardown()
+        teardown(generation)
         if (dying != null && withTimeoutOrNull(5_000) { dying.await() } == null) killEngineProcess()
     }
 
@@ -237,19 +245,33 @@ class EngineManager @Inject constructor(
         scope.launch { runCatching { bridge?.notify("capability/changed") } }
     }
 
+    /**
+     * The `:engine` process of [gen] went away unexpectedly. Three signals report it (the SDK
+     * pipe's EOF, the binder death link, onServiceDisconnected) on different threads; only the
+     * first counts, so one crash is one RestartPolicy failure and one onEngineLost.
+     */
     private fun onEngineGone(gen: Int) {
-        if (sdk == null || gen != generation || gen == expectedExit) return
-        Log.w(TAG, "engine channel closed")
-        teardown()
-        val retryInMs = restarts.recordFailure()
+        val peer: JsonRpcPeer
+        val retryInMs: Long?
+        synchronized(this) {
+            peer = sdk ?: return
+            if (gen != generation || gen == expectedExit) return
+            Log.w(TAG, "engine gen $gen channel closed")
+            teardown(gen)
+            retryInMs = restarts.recordFailure()
+        }
         scope.launch {
-            sessions.get().onEngineLost(retryInMs)
+            // A binder-death signal can beat the pipe's EOF: let the dead channel's buffered tail
+            // (events the process wrote before it died) reach SessionStore before the loss does.
+            withTimeoutOrNull(2_000) { peer.closed.await() }
+            sessions.get().onEngineLost(gen, retryInMs)
             delay(2_000) // let the system record the exit reason
             EngineDiagnostics.collectExitInfo(context)
         }
     }
 
-    private fun teardown() {
+    private fun teardown(retire: Int) {
+        retiredGeneration = maxOf(retiredGeneration, retire)
         sdk = null; bridge = null
         activeRoute = null
         account.get().onEngineStopped()
@@ -279,7 +301,12 @@ class EngineManager @Inject constructor(
             death = null
             throw EngineBackgroundStartException(e)
         }
-        check(context.bindService(intent, conn, Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT)) { "bind failed" }
+        // No BIND_AUTO_CREATE: the started (START_NOT_STICKY) service alone keeps :engine alive. An
+        // auto-create binding makes ActivityManager schedule its own restart of a crashed service
+        // (1 s, then ×4 per crash, ≥10 s apart); while that restart is pending every new
+        // startForegroundService/bindService waits for it, which delayed AC8 recovery by 10–25 s.
+        // Restarts are RestartPolicy's job, so a crash must leave nothing scheduled in the system.
+        check(context.bindService(intent, conn, Context.BIND_IMPORTANT)) { "bind failed" }
         connection = conn
         return withTimeout(20_000) { deferred.await() }
     }

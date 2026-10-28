@@ -116,7 +116,7 @@ private fun ConversationPane(vm: HomeViewModel, onMenu: () -> Unit, onSettings: 
                 when {
                     v == SessionView.Trajectory -> TrajectoryView(vm)
                     isEmpty -> EmptyHero(vm, composer, settings, live, conv, onAutomation)
-                    else -> ChatStream(conv, live, settings.workDetails, listState, onInspect = vm::inspect, onRetry = vm::retry, onOpenSettings = { onSettings("Model") }, modifier = Modifier.fillMaxSize())
+                    else -> ChatStream(conv, live, settings.workDetails, listState, onInspect = vm::inspect, onRetry = vm::retry, onOpenSettings = { onSettings(it) }, modifier = Modifier.fillMaxSize())
                 }
             }
         }

@@ -11,6 +11,7 @@ import io.github.jackwener.dsh.core.capability.ToolSet
 import io.github.jackwener.dsh.core.capability.reqStr
 import io.github.jackwener.dsh.core.model.Risk
 import io.github.jackwener.dsh.core.model.ToolGroup
+import io.github.jackwener.dsh.core.capability.ShellUse
 import io.github.jackwener.dsh.core.platform.ShizukuShell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,15 +25,16 @@ class ClipboardTools @Inject constructor(@ApplicationContext private val context
 
     override val tools = listOf(
         object : Tool("clipboard_get", ToolGroup.Clipboard, Risk.sensitive, false,
-            "Read the clipboard text. Android only allows this while DSH is in the foreground (or via Shizuku).", {}) {
+            "Read the clipboard text. Android only allows this while DSH is in the foreground (or via Shizuku).", {},
+            ShellUse.Fallback, "only work while DSH is in the foreground") {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val text = withContext(Dispatchers.Main) { cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() }
                 if (text != null) return ToolResult.text(text)
                 if (shizuku.available) {
                     val r = shizuku.exec("cmd clipboard get-primary-clip 2>/dev/null || service call clipboard 2")
-                    if (r.code == 0 && r.output.isNotBlank()) return ToolResult.text(r.output.trim())
+                    if (r.code == 0 && r.output.isNotBlank()) return ToolResult.text("(read via Shizuku) " + r.output.trim())
                 }
-                return ToolResult.error("failed", "Clipboard is not readable right now (Android restricts background access).")
+                return ToolResult.error("failed", "Clipboard is not readable right now: Android restricts background access and ${shizuku.access.state.value.reason}.")
             }
         },
         object : Tool("clipboard_set", ToolGroup.Clipboard, Risk.write, false, "Put text on the clipboard.", {

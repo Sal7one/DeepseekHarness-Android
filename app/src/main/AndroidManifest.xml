@@ -35,6 +35,9 @@
         <intent><action android:name="android.intent.action.MAIN" /></intent>
         <!-- Custom Tabs provider for DeepSeek Platform pages (sign-in, top-up, usage). -->
         <intent><action android:name="android.support.customtabs.action.CustomTabsService" /></intent>
+        <!-- Shizuku manager (shell access) and Play Store (to install it). -->
+        <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.android.vending" />
     </queries>
 
     <application

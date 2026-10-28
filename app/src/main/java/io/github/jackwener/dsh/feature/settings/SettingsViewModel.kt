@@ -100,11 +100,9 @@ class SettingsViewModel @Inject constructor(
         }
         val (tip, intent) = PermissionCatalog.vendorKeepAlive(context)
         checks += DoctorCheck(if (zh) "厂商后台限制" else "Vendor background limits", null, tip, intent)
-        checks += DoctorCheck("Shizuku", if (!shizuku.installed) null else shizuku.granted,
-            when { !shizuku.installed -> if (zh) "未安装（可选增强）" else "Not installed (optional)"
-                   !shizuku.running -> if (zh) "已安装但未启动" else "Installed, not running"
-                   !shizuku.granted -> if (zh) "未授权" else "Not authorized"
-                   else -> if (zh) "可用" else "Ready" })
+        val shell = shizuku.access.refresh()
+        checks += DoctorCheck("Shizuku", if (shell == io.github.jackwener.dsh.core.platform.ShellState.NotInstalled) null else shell.ready,
+            shellStateLabel(context, shell), shellFixIntent(shizuku.access, shell))
         val signedIn = account.signedIn
         checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn, when {
             hasKey -> "API key " + (maskedKey ?: "")

@@ -38,10 +38,14 @@ class FloatingBallService : Service() {
         if (!Settings.canDrawOverlays(this)) { stopSelf(); return }
         val wm = getSystemService(WindowManager::class.java)
         val size = (48 * resources.displayMetrics.density).toInt()
+        val margin = (8 * resources.displayMetrics.density).toInt()
+        // Full window width (displayMetrics excludes insets on some devices, which pushed the ball half off-screen).
+        val screenW = wm.currentWindowMetrics.bounds.width()
+        val screenH = wm.currentWindowMetrics.bounds.height()
         val lp = WindowManager.LayoutParams(size, size, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT).apply {
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = resources.displayMetrics.widthPixels - size; y = resources.displayMetrics.heightPixels / 3
+            x = screenW - size - margin; y = screenH / 3
         }
         val v = ImageView(this).apply {
             setImageResource(R.drawable.ic_ball)
@@ -55,7 +59,7 @@ class FloatingBallService : Service() {
                 MotionEvent.ACTION_MOVE -> { lp.x = startX + (e.rawX - downX).toInt(); lp.y = startY + (e.rawY - downY).toInt(); wm.updateViewLayout(v, lp); true }
                 MotionEvent.ACTION_UP -> {
                     if (abs(e.rawX - downX) < 12 && abs(e.rawY - downY) < 12) open()
-                    else { lp.x = if (lp.x + size / 2 < resources.displayMetrics.widthPixels / 2) 0 else resources.displayMetrics.widthPixels - size; wm.updateViewLayout(v, lp) }
+                    else { lp.x = if (lp.x + size / 2 < screenW / 2) margin else screenW - size - margin; wm.updateViewLayout(v, lp) }
                     true
                 }
                 else -> false

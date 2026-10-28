@@ -29,6 +29,20 @@ object EngineRuntimeEnv {
     /** argv flags before the entry script. --expose-internals replaces the require-builtin native addon (js patch 02). */
     val NODE_ARGV = listOf("--expose-internals")
 
+    /** Preload that restores env-driven Node behaviour Android's AT_SECURE disables (see the file's header). */
+    const val PRELOAD = "node_modules/@dsh-android/bundle-android/android-env.cjs"
+
+    /**
+     * Full Node argv before the entry script. Zygote-forked processes run with AT_SECURE=1, so
+     * Node ignores NODE_OPTIONS (and TMPDIR, NODE_COMPILE_CACHE, NODE_EXTRA_CA_CERTS — restored by
+     * [PRELOAD]); the composed NODE_OPTIONS are therefore passed as argv flags as well.
+     */
+    fun nodeArgv(engineDir: File, env: Bundle): List<String> {
+        val options = mergeNodeOptions(env.getString("NODE_OPTIONS"), RUNTIME_NODE_OPTIONS).split(' ').filter { it.isNotBlank() }
+        val preload = File(engineDir, PRELOAD).takeIf { it.exists() }?.let { listOf("--require", it.path) } ?: emptyList()
+        return NODE_ARGV + options + preload
+    }
+
     /** Options appended to the app's NODE_OPTIONS. */
     private val RUNTIME_NODE_OPTIONS = emptyList<String>()
 

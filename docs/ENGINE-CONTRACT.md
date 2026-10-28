@@ -7,12 +7,19 @@ The Android app (Kotlin) and the embedded dsh engine (Node 24 in process `:engin
 `NodeRuntime.nativeStart(argv, stdinFd, stdoutFd, stderrFd)` (JNI, `libdshengine.so`) runs:
 
 ```
-node --expose-internals <ENGINE_DIR>/node_modules/@deepseek-ai/dsh/lib/bin.js --profile android
+node --expose-internals <NODE_OPTIONS flags> --require <ENGINE_DIR>/node_modules/@dsh-android/bundle-android/android-env.cjs \
+     <ENGINE_DIR>/node_modules/@deepseek-ai/dsh/lib/bin.js --profile android
 ```
 
 `--expose-internals` replaces the `node-addon-require-builtin` native addon (js patch 02); Node rejects it in
-`NODE_OPTIONS`, so it is argv-only (`EngineRuntimeEnv.NODE_ARGV`). stderr goes to `<filesDir>/logs/engine.log`
+`NODE_OPTIONS`, so it is argv-only (`EngineRuntimeEnv.nodeArgv`). stderr goes to `<filesDir>/logs/engine.log`
 (previous runs rotated to `engine.log.1..3`).
+
+**AT_SECURE.** Zygote-forked app processes run with `AT_SECURE=1`, so Node's `SafeGetenv` ignores
+`NODE_OPTIONS`, `NODE_COMPILE_CACHE`, `NODE_EXTRA_CA_CERTS` and the `TMPDIR` lookup behind `os.tmpdir()` (which
+then falls back to the nonexistent `/tmp`), although `process.env` still shows them. The app therefore also
+passes the `NODE_OPTIONS` flags in argv, and the `android-env.cjs` preload restores `os.tmpdir()`, the compile
+cache and the extra CA certificates from `process.env` (it logs `android-env: … restored …` when it acts).
 
 Environment (set with `Os.setenv` before start):
 
@@ -36,7 +43,10 @@ Environment (set with `Os.setenv` before start):
 
 ## 2. SDK channel (stdin/stdout)
 
-Unmodified dsh SDK JSON-RPC 2.0, newline-delimited (`packages/sdk/protocol`). The app is the client:
+Unmodified dsh SDK JSON-RPC 2.0, newline-delimited (`packages/sdk/protocol`). The app is the client (notifications are handled strictly in wire order). dsh notifies `session.event`s before they are
+durable: after an `:engine` crash the resumed session re-issues seqs the dead process had already sent, so the app logs
+each engine generation's events at an offset past its log (`LogSeqs`), never treating a seq as a cross-generation identity.
+The app is the client:
 
 - `initialize { cwd: HOME, provider, model, approvalRequests: true, capabilities: { userQuestions: true } }` —
   `provider` is `deepseek-official` when an API key is set, else `deepseek-account` when a DeepSeek account is signed in

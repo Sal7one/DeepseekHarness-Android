@@ -3,7 +3,6 @@ package io.github.jackwener.dsh.core.platform
 import android.content.ComponentName
 import android.content.Context
 import android.content.ServiceConnection
-import android.content.pm.PackageManager
 import android.os.IBinder
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jackwener.dsh.BuildConfig
@@ -20,25 +19,32 @@ import javax.inject.Singleton
 
 data class ShellResult(val code: Int, val output: String)
 
-/** Shell-user privileges through Shizuku (optional enhancement). */
+/**
+ * Thrown when a step needs the shell user and Shizuku is not [ShellState.Ready]. The capability
+ * layer turns it into the Shizuku card in the composer slot and retries the call once it is ready.
+ */
+class ShellUnavailableException(val state: ShellState) : PermissionMissingException(SHIZUKU_WHAT)
+
+/** PendingPermission.what for Shizuku; the composer slot renders the Shizuku card for it. */
+const val SHIZUKU_WHAT = "Shizuku"
+
+/** Shell-user privileges through Shizuku (optional enhancement); availability comes from [ShellAccess]. */
 @Singleton
-class ShizukuShell @Inject constructor(@ApplicationContext private val context: Context) {
+class ShizukuShell @Inject constructor(@ApplicationContext private val context: Context, val access: ShellAccess) {
     private val mutex = Mutex()
     @Volatile private var service: IShellService? = null
 
-    val installed: Boolean get() = runCatching { context.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0); true }.getOrDefault(false)
-    val running: Boolean get() = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
-    val granted: Boolean get() = running && runCatching { Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }.getOrDefault(false)
-    val available: Boolean get() = granted
+    init { Shizuku.addBinderDeadListener { service = null } }
 
-    fun requestPermission() { if (running) Shizuku.requestPermission(REQUEST_CODE) }
+    /** Live check (refreshes [ShellAccess]); true when shell commands can run now. */
+    val available: Boolean get() = access.refresh().ready
 
     private val args = Shizuku.UserServiceArgs(ComponentName(BuildConfig.APPLICATION_ID, ShellUserService::class.java.name))
         .daemon(false).processNameSuffix("shell").debuggable(BuildConfig.DEBUG).version(BuildConfig.VERSION_CODE)
 
     suspend fun service(): IShellService = mutex.withLock {
         service?.takeIf { it.asBinder().pingBinder() }?.let { return it }
-        if (!granted) throw PermissionMissingException("Shizuku (install, start and authorize Shizuku)")
+        access.refresh().let { if (!it.ready) throw ShellUnavailableException(it) }
         val deferred = CompletableDeferred<IShellService>()
         val conn = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -55,5 +61,4 @@ class ShizukuShell @Inject constructor(@ApplicationContext private val context: 
         ShellResult(raw.substringBefore('\n').toIntOrNull() ?: -1, raw.substringAfter('\n'))
     }
 
-    companion object { const val REQUEST_CODE = 7 }
 }

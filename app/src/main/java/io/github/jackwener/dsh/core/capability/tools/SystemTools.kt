@@ -29,7 +29,10 @@ import io.github.jackwener.dsh.core.capability.reqStr
 import io.github.jackwener.dsh.core.capability.str
 import io.github.jackwener.dsh.core.model.Risk
 import io.github.jackwener.dsh.core.model.ToolGroup
-import io.github.jackwener.dsh.core.platform.ShizukuShell
+import io.github.jackwener.dsh.core.capability.ShellGate
+import io.github.jackwener.dsh.core.capability.ShellUse
+import io.github.jackwener.dsh.core.platform.AppVisibility
+import io.github.jackwener.dsh.core.platform.ShellUnavailableException
 import kotlinx.serialization.json.JsonObject
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -37,8 +40,9 @@ import javax.inject.Singleton
 @Singleton
 class SystemTools @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val shizuku: ShizukuShell,
+    private val gate: ShellGate,
 ) : ToolSet {
+    private val shizuku get() = gate.shell
     private val audio get() = context.getSystemService(AudioManager::class.java)
 
     private fun streamOf(name: String?) = when (name) {
@@ -48,9 +52,25 @@ class SystemTools @Inject constructor(
     }
 
     private suspend fun shell(cmd: String, what: String): ToolResult {
-        if (!shizuku.available) throw PermissionMissingException("Shizuku (needed to $what)")
+        if (!shizuku.available) throw ShellUnavailableException(gate.access.state.value)
         val r = shizuku.exec(cmd)
-        return if (r.code == 0) ToolResult.text("Done: $what. ${r.output.trim()}".trim()) else ToolResult.error("failed", r.output.ifBlank { "exit ${r.code}" })
+        return if (r.code == 0) ToolResult.text("Done via Shizuku: $what. ${r.output.trim()}".trim()) else ToolResult.error("failed", r.output.ifBlank { "exit ${r.code}" })
+    }
+
+    /** Shizuku attempt for a [ShellUse.Fallback] tool: null (→ fallback path) when it fails. */
+    private suspend fun shellOrNull(cmd: String, what: String): ToolResult? = runCatching { shell(cmd, what) }.getOrNull()?.takeIf { it.ok }
+
+    /**
+     * The non-shell path for a toggle: a system panel/page the user finishes with one tap. Android
+     * only lets DSH open it while DSH is visible (or may draw overlays); otherwise say so plainly.
+     */
+    private fun openForUser(intent: Intent, what: String): ToolResult {
+        val reason = gate.access.state.value.let { if (it.ready) "the Shizuku command failed" else it.reason }
+        if (!AppVisibility.isForeground && !Settings.canDrawOverlays(context))
+            return ToolResult.error("needs_user", "Could not $what directly ($reason) and Android blocks opening system panels while DSH is in the background. Ask the user to do it.")
+        return runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.fold(
+            { ToolResult.text("path=system_panel: $reason, so I opened the system page to $what. The user must tap the switch there; verify with device_status before relying on it.") },
+            { ToolResult.error("failed", "Could not $what ($reason) and the system page failed to open: ${it.message}") })
     }
 
     override val tools = listOf(
@@ -162,23 +182,45 @@ class SystemTools @Inject constructor(
                 return ToolResult.text(if (timer != null) "Timer set for ${timer}s" else "Alarm set ${args.int("hour")}:${"%02d".format(args.int("minute") ?: 0)}")
             }
         },
-        object : Tool("wifi_toggle", ToolGroup.System, Risk.write, false, "Turn Wi-Fi on/off (needs Shizuku).", { bool("on", "", required = true) }) {
-            override suspend fun invoke(args: JsonObject, call: CallContext) =
-                shell("svc wifi ${if (args.bool("on") == true) "enable" else "disable"}", "switch Wi-Fi")
+        object : Tool("wifi_toggle", ToolGroup.System, Risk.write, false,
+            "Turn Wi-Fi on/off. Directly through Shizuku when available; otherwise opens the system Wi-Fi panel for the user to tap.",
+            { bool("on", "", required = true) }, ShellUse.Fallback, "open the system Wi-Fi panel and the user taps the switch") {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val on = args.bool("on") == true
+                if (runCatching { context.getSystemService(WifiManager::class.java).isWifiEnabled }.getOrNull() == on)
+                    return ToolResult.text("Wi-Fi is already ${if (on) "on" else "off"}; nothing to do.")
+                if (gate.acquire(call, name, optional = true)) shellOrNull("svc wifi ${if (on) "enable" else "disable"}", "switch Wi-Fi ${if (on) "on" else "off"}")?.let { return it }
+                return openForUser(Intent(Settings.Panel.ACTION_WIFI), "switch Wi-Fi ${if (on) "on" else "off"}")
+            }
         },
-        object : Tool("bluetooth_toggle", ToolGroup.System, Risk.write, false, "Turn Bluetooth on/off (needs Shizuku).", { bool("on", "", required = true) }) {
-            override suspend fun invoke(args: JsonObject, call: CallContext) =
-                shell("cmd bluetooth_manager ${if (args.bool("on") == true) "enable" else "disable"}", "switch Bluetooth")
+        object : Tool("bluetooth_toggle", ToolGroup.System, Risk.write, false,
+            "Turn Bluetooth on/off. Directly through Shizuku when available; otherwise shows the system Bluetooth prompt/page for the user to confirm.",
+            { bool("on", "", required = true) }, ShellUse.Fallback, "show the system Bluetooth prompt or page and the user confirms") {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val on = args.bool("on") == true
+                val adapter = runCatching { context.getSystemService(android.bluetooth.BluetoothManager::class.java).adapter }.getOrNull()
+                if (adapter == null) return ToolResult.error("unsupported", "This phone has no Bluetooth adapter.")
+                if (runCatching { adapter.isEnabled }.getOrNull() == on) return ToolResult.text("Bluetooth is already ${if (on) "on" else "off"}; nothing to do.")
+                if (gate.acquire(call, name, optional = true)) shellOrNull("cmd bluetooth_manager ${if (on) "enable" else "disable"}", "switch Bluetooth ${if (on) "on" else "off"}")?.let { return it }
+                val canAsk = on && context.checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                return openForUser(if (canAsk) Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE) else Intent(Settings.ACTION_BLUETOOTH_SETTINGS),
+                    "switch Bluetooth ${if (on) "on" else "off"}")
+            }
         },
-        object : Tool("mobile_data_toggle", ToolGroup.System, Risk.write, false, "Turn mobile data on/off (needs Shizuku).", { bool("on", "", required = true) }) {
-            override suspend fun invoke(args: JsonObject, call: CallContext) =
-                shell("svc data ${if (args.bool("on") == true) "enable" else "disable"}", "switch mobile data")
+        object : Tool("mobile_data_toggle", ToolGroup.System, Risk.write, false,
+            "Turn mobile data on/off. Directly through Shizuku when available; otherwise opens the system Internet panel for the user to tap.",
+            { bool("on", "", required = true) }, ShellUse.Fallback, "open the system Internet panel and the user taps the switch") {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val on = args.bool("on") == true
+                if (gate.acquire(call, name, optional = true)) shellOrNull("svc data ${if (on) "enable" else "disable"}", "switch mobile data ${if (on) "on" else "off"}")?.let { return it }
+                return openForUser(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY), "switch mobile data ${if (on) "on" else "off"}")
+            }
         },
         object : Tool("setting_put", ToolGroup.System, Risk.dangerous, false,
             "Write an Android setting via `settings put <namespace> <key> <value>` (needs Shizuku). For things no dedicated tool covers.", {
                 string("namespace", "", required = true, enum = listOf("system", "secure", "global"))
                 string("key", "", required = true); string("value", "", required = true)
-            }) {
+            }, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val v = args.reqStr("value").replace("'", "")
                 return shell("settings put ${args.reqStr("namespace")} ${args.reqStr("key").filter { it.isLetterOrDigit() || it in "_." }} '$v'", "change setting")

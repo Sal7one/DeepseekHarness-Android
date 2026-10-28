@@ -91,6 +91,7 @@ class SessionStore @Inject constructor(
     private val sessionGrants = ConcurrentHashMap<String, MutableSet<String>>()
     /** sessionId -> engine generation it was last resumed/created in. */
     private val resumedIn = ConcurrentHashMap<String, Int>()
+    private val logSeqs = LogSeqs()
     private val localSeq = AtomicLong(-System.currentTimeMillis())
     @Volatile private var viewing: String? = null
 
@@ -121,6 +122,7 @@ class SessionStore @Inject constructor(
         val entity = dao.get(sessionId)
         val events = dao.events(sessionId).map { it.toLogged() }
         val preset = entity?.preset?.let { PermissionPreset.of(it) } ?: settings.current().defaultPreset
+        android.util.Log.i(TAG, "session $sessionId loaded: preset ${preset.id} (${if (entity?.preset != null) "session row" else "settings default"})")
         MutableStateFlow(SessionLive(sessionId, entity?.title ?: "", events, running = false, preset = preset, exists = entity != null))
             .also { states[sessionId] = it }
     }
@@ -292,6 +294,8 @@ class SessionStore @Inject constructor(
     suspend fun setPinned(sessionId: String, pinned: Boolean) = dao.setPinned(sessionId, pinned)
     suspend fun setArchived(sessionId: String, archived: Boolean) = dao.setArchived(sessionId, archived)
     suspend fun setPreset(sessionId: String, preset: PermissionPreset) {
+        // Preset changes are rare and user-initiated; the stack pins down any other caller.
+        android.util.Log.i(TAG, "session $sessionId preset -> ${preset.id}", Throwable("setPreset caller"))
         if (dao.get(sessionId) != null) dao.setPreset(sessionId, preset.id)
         mutate(sessionId) { it.copy(preset = preset) }
     }
@@ -305,7 +309,13 @@ class SessionStore @Inject constructor(
 
     // ---- SDK callbacks ---------------------------------------------------------------------------
 
-    suspend fun onNotification(method: String, params: JsonObject) {
+    /** Maps a dsh event seq to its log seq (see [LogSeqs]); the log's newest seq is read only when a generation starts. */
+    private suspend fun logSeq(sessionId: String, gen: Int, seq: Long): Long =
+        logSeqs.mapped(sessionId, gen, seq) ?: logSeqs.start(sessionId, gen, seq, flowOf(sessionId).value.events.maxOfOrNull { it.seq } ?: -1L).also { mapped ->
+            if (mapped != seq) android.util.Log.i(TAG, "session $sessionId gen $gen: engine seq $seq was already logged; logging from $mapped")
+        }
+
+    suspend fun onNotification(method: String, params: JsonObject, gen: Int) {
         if (method == "subagent.started") {
             val parent = params.s("parentSessionId") ?: return
             val child = params.s("childSessionId") ?: return
@@ -321,7 +331,7 @@ class SessionStore @Inject constructor(
             "session.event" -> {
                 val event = params.o("event") ?: return
                 val type = event.s("type") ?: return
-                val seq = event.l("seq") ?: return
+                val seq = logSeq(sessionId, gen, event.l("seq") ?: return)
                 val time = event.l("time") ?: System.currentTimeMillis()
                 if (type in UNLOGGED) return
                 val data = slim(type, event.o("data") ?: JsonObject(emptyMap()))
@@ -331,6 +341,8 @@ class SessionStore @Inject constructor(
                 if (type == "assistant/message") recordUsage(data)
             }
             "session.status" -> {
+                // A torn-down generation's status (its tail drained after the loss) is not this run's.
+                if (gen <= engine.retiredGeneration) return
                 val running = params.s("status") == "running"
                 dao.setRunning(sessionId, running)
                 mutate(sessionId) { it.copy(running = running, startingEngine = false, runStartedAt = if (running) (it.runStartedAt ?: System.currentTimeMillis()) else null) }
@@ -365,6 +377,7 @@ class SessionStore @Inject constructor(
         }
         val live = flowOf(sessionId).value
         val risk = capabilities.descriptor(tool)?.risk ?: Risk.write
+        android.util.Log.i(TAG, "approval $tool (risk $risk) for $sessionId (from ${p.s("sessionId")}), preset ${live.preset.id}")
         when (live.preset) {
             PermissionPreset.ReadOnly -> return "rejected"
             PermissionPreset.Full -> if (risk != Risk.dangerous) return "allowed-once"
@@ -383,6 +396,7 @@ class SessionStore @Inject constructor(
             approvals.remove(key)
             mutate(sessionId) { if (it.approval?.requestKey == key) it.copy(approval = null) else it }
         }
+        android.util.Log.i(TAG, "approval $tool answered $outcome; preset now ${flowOf(sessionId).value.preset.id}")
         return when (outcome) {
             ApprovalOutcome.AllowOnce -> "allowed-once"
             ApprovalOutcome.AllowSession -> { sessionGrants.getOrPut(sessionId) { ConcurrentHashMap.newKeySet() }.add(tool); "allowed-once" }
@@ -535,8 +549,9 @@ class SessionStore @Inject constructor(
      * gets one automatic continuation per turn; a second loss in the same turn, or an open circuit
      * breaker ([retryInMs] == null), leaves the visible engine_lost error with its 继续 button.
      */
-    suspend fun onEngineLost(retryInMs: Long?) {
+    suspend fun onEngineLost(gen: Int, retryInMs: Long?) {
         if (stopping) return
+        android.util.Log.w(TAG, "engine gen $gen lost; retry in $retryInMs ms")
         cancelPending()
         val running = states.values.map { it.value }.filter { it.running }.map { it.sessionId }.toSet() + dao.running().map { it.id }
         val roots = mutableListOf<String>()
@@ -574,6 +589,8 @@ class SessionStore @Inject constructor(
     }
 
     private companion object {
+        const val TAG = "SessionStore"
+
         /** Model-facing continuation after an engine crash (the interrupted tool calls were closed by session/resume). */
         const val CONTINUE_AFTER_CRASH = "[DSH] The agent engine stopped unexpectedly and was restarted, so your previous turn was " +
             "interrupted. Check which steps already completed (do not repeat them), then continue the task."

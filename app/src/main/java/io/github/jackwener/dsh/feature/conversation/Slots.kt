@@ -61,7 +61,12 @@ import io.github.jackwener.dsh.core.session.PendingTakeover
 import io.github.jackwener.dsh.core.session.PendingQuestion
 import io.github.jackwener.dsh.core.session.ToolState
 import io.github.jackwener.dsh.core.session.parseArgs
+import io.github.jackwener.dsh.core.platform.SHIZUKU_WHAT
 import io.github.jackwener.dsh.feature.settings.PermissionCatalog
+import io.github.jackwener.dsh.feature.settings.ShellGuideActions
+import io.github.jackwener.dsh.feature.settings.ShellGuideBody
+import io.github.jackwener.dsh.feature.settings.rememberShellGuideFlow
+import io.github.jackwener.dsh.feature.settings.rememberShellState
 import io.github.jackwener.dsh.feature.settings.isZh
 
 /** The approval-style card frame: warn border, warn strip, scrolling body, right-aligned actions. */
@@ -107,12 +112,35 @@ fun ApprovalCard(a: PendingApproval, onAnswer: (ApprovalOutcome) -> Unit) {
     }
 }
 
+/** The composer slot's permission wait: the Shizuku guide for shell steps, else the Android permission card. */
+@Composable
+fun PermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
+    if (p.what == SHIZUKU_WHAT) ShizukuCard(p, onAnswer) else SystemPermissionCard(p, onAnswer)
+}
+
+/**
+ * Just-in-time Shizuku card: the guide for the current state (install / open / authorize). The
+ * waiting call resumes on its own once Shizuku is ready (ShellGate watches the state); 不用了 lets
+ * the tool take its non-shell path or tell the model, and is remembered for the session.
+ */
+@Composable
+private fun ShizukuCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
+    val (access, s) = rememberShellState()
+    val flow = rememberShellGuideFlow(access, s)
+    var answered by remember(p.requestKey) { mutableStateOf(false) }
+    AttentionCard(stringResource(R.string.shz_strip), answered || s.ready, body = {
+        ShellGuideBody(s, stringResource(ToolPresentation.info(p.toolName).title))
+    }) {
+        ShellGuideActions(s, flow, onDecline = { answered = true; onAnswer(false) }, enabled = !answered)
+    }
+}
+
 /**
  * Just-in-time Android permission card in the composer slot: 拒绝 / 去授权, then 继续 after the
  * user comes back from the system page (auto-continues when the permission is now granted).
  */
 @Composable
-fun PermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
+private fun SystemPermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
     val c = Dsh.colors
     val context = LocalContext.current
     val zh = isZh()

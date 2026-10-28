@@ -64,7 +64,7 @@ class EngineService : Service() {
             File(env.getString("HOME") ?: filesDir.path).mkdirs()
 
             // argv[0] ("node") is prepended by libdshengine.
-            val args = (EngineRuntimeEnv.NODE_ARGV + listOf(File(engineDir, "node_modules/@deepseek-ai/dsh/lib/bin.js").path, "--profile", "android")).toTypedArray()
+            val args = (EngineRuntimeEnv.nodeArgv(engineDir, env) + listOf(File(engineDir, "node_modules/@deepseek-ai/dsh/lib/bin.js").path, "--profile", "android")).toTypedArray()
             val inRead = stdin[0].detachFd()
             val outWrite = stdout[1].detachFd()
             val errWrite = stderr.detachFd()

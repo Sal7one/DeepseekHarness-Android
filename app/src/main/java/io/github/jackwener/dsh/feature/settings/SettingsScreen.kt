@@ -336,13 +336,9 @@ private fun PhoneSection(vm: SettingsViewModel, onNotificationApps: () -> Unit) 
         val (tip, intent) = remember { PermissionCatalog.vendorKeepAlive(context) }
         SettingsRow(stringResource(R.string.keep_alive), tip, onClick = { runCatching { context.startActivity(intent) } },
             trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = c.labelTertiary) })
-        SettingsRow("Shizuku", when {
-            !vm.shizuku.installed -> stringResource(R.string.shizuku_missing)
-            !vm.shizuku.running -> stringResource(R.string.shizuku_stopped)
-            !vm.shizuku.granted -> stringResource(R.string.shizuku_unauthorized)
-            else -> stringResource(R.string.shizuku_ready)
-        }, leading = { StateDot(if (vm.shizuku.granted) DotKind.Done else DotKind.Idle) })
     }
+    SettingsGroupTitle(stringResource(R.string.shz_group))
+    ShellAccessCard()
 }
 
 @Composable

@@ -86,7 +86,7 @@ fun ChatStream(
     listState: LazyListState,
     onInspect: (String) -> Unit,
     onRetry: (TurnError) -> Unit,
-    onOpenSettings: () -> Unit,
+    onOpenSettings: (section: String) -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
 ) {
@@ -123,7 +123,7 @@ fun ChatStream(
 @Composable
 private fun TurnView(
     turn: Turn, isLast: Boolean, live: SessionLive, details: WorkDetails,
-    onInspect: (String) -> Unit, onRetry: (TurnError) -> Unit, onOpenSettings: () -> Unit, compact: Boolean,
+    onInspect: (String) -> Unit, onRetry: (TurnError) -> Unit, onOpenSettings: (String) -> Unit, compact: Boolean,
 ) {
     val running = turn.status == TurnStatus.Running
     val process = turn.process
@@ -244,7 +244,7 @@ private fun TailActions(turn: Turn) {
 
 /** dsh turn error: red dot | title + message + code, with a retry affordance. */
 @Composable
-private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings: () -> Unit, retryable: Boolean) {
+private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings: (String) -> Unit, retryable: Boolean) {
     val c = Dsh.colors
     val account = io.github.jackwener.dsh.feature.account.LocalAccount.current
     val openPlatform = io.github.jackwener.dsh.feature.account.rememberPlatformOpener()
@@ -277,8 +277,8 @@ private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings:
             if (retryable) Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
                     needsSignIn -> {
-                        DButton(stringResource(R.string.acct_sign_in), { if (account != null) account.startSignIn() else onOpenSettings() }, size = BtnSize.Sm)
-                        DButton(stringResource(R.string.acct_add_api_key), onOpenSettings, size = BtnSize.Sm, variant = BtnVariant.Outline)
+                        DButton(stringResource(R.string.acct_sign_in), { if (account != null) account.startSignIn() else onOpenSettings("Account") }, size = BtnSize.Sm)
+                        DButton(stringResource(R.string.acct_add_api_key), { onOpenSettings("Model") }, size = BtnSize.Sm, variant = BtnVariant.Outline)
                         if (e.kind != "no_credentials" && e.kind != "no_key" || account?.signedIn == true)
                             DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
                     }
@@ -286,7 +286,11 @@ private fun ErrorRow(e: TurnError, onRetry: (TurnError) -> Unit, onOpenSettings:
                         DButton(stringResource(R.string.acct_quota_top_up), { openPlatform(account?.state?.value?.topUpUrl ?: "https://platform.deepseek.com/top_up") }, size = BtnSize.Sm)
                         DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
                     }
-                    e.kind == "engine" || e.kind == "engine_lost" -> DButton(stringResource(R.string.restart_engine_retry), { onRetry(e) }, size = BtnSize.Sm, icon = R.drawable.dsw_refresh_outline)
+                    e.kind == "engine" || e.kind == "engine_lost" -> {
+                        DButton(stringResource(R.string.restart_engine_retry), { onRetry(e) }, size = BtnSize.Sm, icon = R.drawable.dsw_refresh_outline)
+                        // Settings → 关于: engine status, 自检 (crash breaker, last exit), engine log, exit record.
+                        DButton(stringResource(R.string.err_open_doctor), { onOpenSettings("About") }, size = BtnSize.Sm, variant = BtnVariant.Outline)
+                    }
                     else -> DButton(stringResource(R.string.retry), { onRetry(e) }, size = BtnSize.Sm, variant = BtnVariant.Outline, icon = R.drawable.dsw_refresh_outline)
                 }
             }

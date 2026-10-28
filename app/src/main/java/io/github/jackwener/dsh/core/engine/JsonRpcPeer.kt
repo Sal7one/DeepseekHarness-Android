@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -30,6 +31,11 @@ val RpcJson = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefa
 /**
  * Newline-delimited JSON-RPC 2.0 over a byte-stream pair. Used for both the dsh SDK channel
  * (stdio) and the capability channel (socketpair). See docs/ENGINE-CONTRACT.md.
+ *
+ * Notifications are delivered to [onNotification] one at a time, in wire order (dsh's
+ * `session.event` stream and its `session.status` transitions are only meaningful in order);
+ * requests from the peer run concurrently. [onClosed] fires after the last notification that
+ * arrived before end-of-stream was handled, so the owner sees a dead channel's tail first.
  */
 class JsonRpcPeer(
     private val name: String,
@@ -43,8 +49,21 @@ class JsonRpcPeer(
     private val nextId = AtomicLong(1)
     private val pending = ConcurrentHashMap<Long, CompletableDeferred<JsonElement>>()
     private val writeLock = Mutex()
+    private val notifications = Channel<Pair<String, JsonObject>>(Channel.UNLIMITED)
+    /** Completed once the channel closed and every notification received before that was handled. */
+    val closed = CompletableDeferred<Unit>()
 
     fun start() {
+        scope.launch {
+            try {
+                for ((method, params) in notifications) {
+                    runCatching { onNotification(method, params) }.onFailure { Log.e(TAG, "$name notify $method", it) }
+                }
+            } finally {
+                closed.complete(Unit)
+                onClosed()
+            }
+        }
         scope.launch(Dispatchers.IO) {
             try {
                 input.bufferedReader().useLines { lines -> lines.forEach { if (it.isNotBlank()) dispatch(it) } }
@@ -53,7 +72,7 @@ class JsonRpcPeer(
             } finally {
                 pending.values.forEach { it.completeExceptionally(JsonRpcException(-32000, "$name channel closed")) }
                 pending.clear()
-                onClosed()
+                notifications.close()
             }
         }
     }
@@ -93,7 +112,7 @@ class JsonRpcPeer(
                 }
                 send(response)
             }
-            method != null -> scope.launch { runCatching { onNotification(method, params) }.onFailure { Log.e(TAG, "$name notify $method", it) } }
+            method != null -> notifications.trySend(method to params)
             id != null -> {
                 val deferred = pending.remove((id as? JsonPrimitive)?.longOrNull ?: return) ?: return
                 val err = msg["error"] as? JsonObject

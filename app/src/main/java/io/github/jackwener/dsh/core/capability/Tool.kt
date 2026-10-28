@@ -45,7 +45,7 @@ class ToolResult(val ok: Boolean, val content: List<Content>, val errorCode: Str
 }
 
 /** Thrown by tools when an Android permission or service is missing. */
-class PermissionMissingException(val what: String) : Exception(what)
+open class PermissionMissingException(val what: String) : Exception(what)
 class InvalidArgsException(message: String) : Exception(message)
 
 data class CallContext(val sessionId: String, val callId: String, val unattended: Boolean)
@@ -57,6 +57,10 @@ abstract class Tool(
     val needsUnlock: Boolean,
     val description: String,
     schema: SchemaBuilder.() -> Unit,
+    /** Shizuku dependency; CapabilityHub appends the live availability to the description. */
+    val shell: ShellUse = ShellUse.None,
+    /** What happens without Shizuku (model-facing, e.g. "open the Wi-Fi panel for the user to tap"). */
+    val shellFallback: String? = null,
 ) {
     val descriptor = ToolDescriptor(name, group.id, description, SchemaBuilder().apply(schema).build(), risk, needsUnlock)
     abstract suspend fun invoke(args: JsonObject, call: CallContext): ToolResult

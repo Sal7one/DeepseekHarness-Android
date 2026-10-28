@@ -17,4 +17,5 @@
     <string name="ime_label">DSH keyboard</string>
     <string name="ime_bar">DSH keyboard (lets the agent type) · tap to switch back to your keyboard</string>
     <string name="engine_last_exit">Last engine exit</string>
+    <string name="err_open_doctor">Open Doctor</string>
 </resources>

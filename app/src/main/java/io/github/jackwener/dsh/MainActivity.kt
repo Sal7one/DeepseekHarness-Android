@@ -46,7 +46,9 @@ import io.github.jackwener.dsh.feature.automation.AutomationScreen
 import io.github.jackwener.dsh.feature.automation.RuleDetailScreen
 import io.github.jackwener.dsh.feature.conversation.HomeScreen
 import io.github.jackwener.dsh.feature.conversation.HomeViewModel
+import io.github.jackwener.dsh.feature.settings.EnhanceStep
 import io.github.jackwener.dsh.feature.settings.Onboarding
+import io.github.jackwener.dsh.feature.settings.shellAccessOf
 import io.github.jackwener.dsh.feature.settings.NotificationAppsScreen
 import io.github.jackwener.dsh.feature.settings.SettingsScreen
 import io.github.jackwener.dsh.feature.settings.SettingsSection
@@ -132,8 +134,13 @@ class MainActivity : ComponentActivity() {
         NavHost(nav, startDestination = start, enterTransition = { fadeIn() }, exitTransition = { fadeOut() }) {
             composable("onboarding") {
                 Onboarding(showKey = onboardingKey, onShowKey = { onboardingKey = it },
-                    onDone = { nav.navigate("home") { popUpTo("onboarding") { inclusive = true } } })
+                    onDone = {
+                        // Optional 增强能力 step (Shizuku) unless it is already set up.
+                        val next = if (shellAccessOf(this@MainActivity).refresh().ready) "home" else "enhance"
+                        nav.navigate(next) { popUpTo("onboarding") { inclusive = true } }
+                    })
             }
+            composable("enhance") { EnhanceStep(onDone = { nav.navigate("home") { popUpTo("enhance") { inclusive = true } } }) }
             composable("home") {
                 HomeScreen(home,
                     onSettings = { section -> nav.navigate("settings?section=${section ?: ""}") },

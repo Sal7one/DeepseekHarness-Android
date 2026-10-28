@@ -60,6 +60,7 @@ class CapabilityHub @Inject constructor(
     files: FileTools, apps: AppTools, screen: ScreenTools, system: SystemTools, notifications: NotificationTools,
     comms: CommsTools, media: MediaTools, clipboard: ClipboardTools, browser: BrowserTools, ruleTools: RuleTools,
     vscreen: VirtualScreenTools,
+    private val shellGate: ShellGate,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val allTools: Map<String, Tool> = listOf(files, apps, screen, system, notifications, comms, media, clipboard, browser, ruleTools, vscreen)
@@ -69,6 +70,12 @@ class CapabilityHub @Inject constructor(
     init {
         scope.launch {
             settings.settings.map { it.enabledGroups }.distinctUntilChanged().drop(1).collect {
+                runCatching { bridge?.notify("capability/changed") }
+            }
+        }
+        // Shizuku-backed tool descriptions carry the live availability; re-list when it flips.
+        scope.launch {
+            shellGate.access.state.map { it::class }.distinctUntilChanged().drop(1).collect {
                 runCatching { bridge?.notify("capability/changed") }
             }
         }
@@ -84,8 +91,11 @@ class CapabilityHub @Inject constructor(
             val enabled = settings.current().enabledGroups
             buildJsonObject {
                 putJsonArray("tools") {
-                    allTools.values.filter { ToolGroup.of(it.descriptor.group) in enabled }
-                        .forEach { add(RpcJson.encodeToJsonElement(ToolDescriptor.serializer(), it.descriptor)) }
+                    allTools.values.filter { ToolGroup.of(it.descriptor.group) in enabled }.forEach { t ->
+                        val d = if (t.shell == ShellUse.None) t.descriptor
+                            else t.descriptor.copy(description = t.descriptor.description + shellGate.describe(t.shell, t.shellFallback))
+                        add(RpcJson.encodeToJsonElement(ToolDescriptor.serializer(), d))
+                    }
                 }
             }
         }
@@ -124,6 +134,10 @@ class CapabilityHub @Inject constructor(
             while (result == null) {
                 try {
                     result = tool.invoke(args, call)
+                } catch (e: io.github.jackwener.dsh.core.platform.ShellUnavailableException) {
+                    // Shizuku-only step: the Shizuku card waits in the composer slot and the call resumes
+                    // as soon as Shizuku is ready; 不用了 (or an automation) gets a clear model-facing result.
+                    if (attempt++ >= 2 || !shellGate.acquire(call, name, optional = false)) return shellGate.unavailable(call)
                 } catch (e: PermissionMissingException) {
                     // Attended sessions get a just-in-time permission card in the composer slot; the call
                     // waits there and is retried once the user comes back from the system settings page.

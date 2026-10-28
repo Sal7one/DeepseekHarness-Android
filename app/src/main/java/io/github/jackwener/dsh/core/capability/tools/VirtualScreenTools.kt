@@ -5,6 +5,7 @@ import android.util.Base64
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jackwener.dsh.core.capability.CallContext
 import io.github.jackwener.dsh.core.capability.InvalidArgsException
+import io.github.jackwener.dsh.core.capability.ShellUse
 import io.github.jackwener.dsh.core.capability.Tool
 import io.github.jackwener.dsh.core.capability.ToolResult
 import io.github.jackwener.dsh.core.capability.ToolSet
@@ -35,7 +36,7 @@ class VirtualScreenTools @Inject constructor(
 
     override val tools = listOf(
         object : Tool("vscreen_start", ToolGroup.VScreen, Risk.write, false,
-            "Create the agent's own invisible screen (needs Shizuku). Returns displayId; pass it to app_launch/screen_* tools so work happens off the user's screen.", {}) {
+            "Create the agent's own invisible screen (needs Shizuku). Returns displayId; pass it to app_launch/screen_* tools so work happens off the user's screen.", {}, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 activeDisplay?.let { return ToolResult.text("Virtual screen already running: displayId=$it") }
                 val m = context.resources.displayMetrics
