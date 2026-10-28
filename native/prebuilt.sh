@@ -46,7 +46,7 @@ package() {
 
 publish() {
   local tag tarball; tag="$(key)"; tarball="$(package)"
-  gh release create "$tag" "$tarball" "$WORK/out/symbols/libnode.so#libnode.so (unstripped symbols)" \
+  gh release create "$tag" --prerelease --latest=false "$tarball" "$WORK/out/symbols/libnode.so#libnode.so (unstripped symbols)" \
     --repo "$GH_REPO" --title "$tag" \
     --notes "Prebuilt android $ABI native libs for inputs $tag (native/build.sh + patches). Fetch with native/prebuilt.sh fetch."
 }
