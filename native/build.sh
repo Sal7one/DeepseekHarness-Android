@@ -90,9 +90,11 @@ EOF
 }
 
 target_env() {
-  export CC="$TC/bin/target-cc" CXX="$TC/bin/target-cxx" LINK="$TC/bin/target-cxx"
+  # ccache (if installed) makes a rebuild after a patch/flag change recompile only what changed.
+  local cc=""; command -v ccache >/dev/null && cc="ccache "
+  export CC="${cc}$TC/bin/target-cc" CXX="${cc}$TC/bin/target-cxx" LINK="$TC/bin/target-cxx"
   export AR=llvm-ar NM="$(command -v nm || echo llvm-nm)" RANLIB=llvm-ranlib READELF=llvm-readelf STRIP=llvm-strip
-  export CC_host="$HOST_CC" CXX_host="$HOST_CXX" LINK_host="$HOST_CXX"
+  export CC_host="${cc}$HOST_CC" CXX_host="${cc}$HOST_CXX" LINK_host="$HOST_CXX"
   export AR_host=llvm-ar NM_host=llvm-nm RANLIB_host=llvm-ranlib
 }
 

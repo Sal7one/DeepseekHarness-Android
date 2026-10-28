@@ -11,6 +11,21 @@ Builds everything the `:engine` process needs to run dsh in-process:
 
 Outputs are **not committed**; they go to `$WORK/out/arm64-v8a/` (default `WORK=<repo>/../toolchains`).
 
+## Prebuilt (normal workflow)
+
+Native libs are built rarely (Node upgrade or a native patch) and published as a GitHub Release whose tag is a hash of
+every native input (`native-node<version>-<hash>`: Node version, `build.sh`, `patches/`, `engine-jni/`). App and engine
+builds just fetch them:
+
+```sh
+native/prebuilt.sh fetch      # → toolchains/out/jniLibs/arm64-v8a (sha256-verified), what Gradle packages
+```
+
+If `fetch` says there is no release for the current key, the native inputs changed: run `native/build.sh` (with `ccache`
+installed only changed files recompile), then `native/prebuilt.sh publish`. Never change configure flags casually — a
+global define change (e.g. `--openssl-no-asm`, which adds `OPENSSL_NO_ASM` to every target) rebuilds all of V8; prefer
+target-scoped gyp patches like `dsh-deps-openssl-no-asm-android.patch`.
+
 ## Reproduce
 
 ```sh
