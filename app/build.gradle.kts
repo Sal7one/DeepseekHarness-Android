@@ -23,20 +23,33 @@ android {
         applicationId = "io.github.jackwener.dsh"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         ndk { abiFilters += "arm64-v8a" }
         // Bundled official Shizuku APK (in-app install/update); pinned in tools/fetch-shizuku.sh.
         buildConfigField("String", "SHIZUKU_VERSION", "\"${shizukuPin("VERSION")}\"")
         buildConfigField("long", "SHIZUKU_VERSION_CODE", "${shizukuPin("VERSION_CODE")}L")
     }
 
+    // Release signing comes from Gradle properties (e.g. ~/.gradle/gradle.properties or -P), never from the repo:
+    // dsh.signing.storeFile, dsh.signing.storePassword, dsh.signing.keyAlias, dsh.signing.keyPassword.
+    // Without them a release build falls back to the debug key.
+    val signingProp = { k: String -> providers.gradleProperty("dsh.signing.$k").orNull }
+    signingConfigs {
+        if (signingProp("storeFile") != null) create("release") {
+            storeFile = file(signingProp("storeFile")!!)
+            storePassword = signingProp("storePassword")
+            keyAlias = signingProp("keyAlias")
+            keyPassword = signingProp("keyPassword")
+        }
+    }
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // R8 stays off until a minified build has been verified on a device.
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
     compileOptions {
