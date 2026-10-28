@@ -63,7 +63,8 @@ import java.io.File
 
 fun copyText(context: Context, text: String) {
     context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("dsh", text))
-    Toast.makeText(context, R.string.copied, Toast.LENGTH_SHORT).show()
+    // Android 13+ shows its own clipboard confirmation; a Toast on top would double it.
+    if (android.os.Build.VERSION.SDK_INT < 33) Toast.makeText(context, R.string.copied, Toast.LENGTH_SHORT).show()
 }
 
 /**
@@ -102,7 +103,7 @@ fun CodeCard(text: String, modifier: Modifier = Modifier, label: String? = null,
     Column(modifier.fillMaxWidth().clip(Radius.lg).background(c.codeBlock).border(Hairline, c.borderL1, Radius.lg)) {
         Row(Modifier.fillMaxWidth().background(c.codeBanner).padding(start = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(label ?: "", Modifier.weight(1f), style = DshType.mono11, color = c.labelTertiary, maxLines = 1)
-            IconBtn(R.drawable.dsw_copy_outline, { copyText(context, text) }, size = 32.dp, iconSize = 14.dp, tint = c.labelTertiary)
+            IconBtn(R.drawable.dsw_copy_outline, { copyText(context, text) }, size = 32.dp, iconSize = 14.dp, tint = c.labelTertiary, contentDescription = stringResource(R.string.copy))
         }
         if (header != null) Text(header, Modifier.padding(horizontal = 14.dp, vertical = 2.dp), style = DshType.mono11, color = c.labelPrimary)
         SelectionContainer {
@@ -187,7 +188,7 @@ fun Lightbox(file: File, onDismiss: () -> Unit) {
         Box(Modifier.fillMaxSize().background(Color(0xE0000000)).clickable { onDismiss() }, contentAlignment = Alignment.Center) {
             AsyncImage(file, null, Modifier.fillMaxSize().transformable(state)
                 .graphicsLayer { scaleX = scale; scaleY = scale; translationX = offset.x; translationY = offset.y }, contentScale = ContentScale.Fit)
-            IconBtn(R.drawable.dsw_close_outline, onDismiss, Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp), size = 40.dp, iconSize = 20.dp, tint = Color.White)
+            IconBtn(R.drawable.dsw_close_outline, onDismiss, Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp), size = 40.dp, iconSize = 20.dp, tint = Color.White, contentDescription = stringResource(R.string.close))
         }
     }
 }

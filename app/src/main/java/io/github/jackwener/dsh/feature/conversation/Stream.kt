@@ -41,6 +41,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.jackwener.dsh.R
@@ -115,7 +118,11 @@ fun ChatStream(
             val c = Dsh.colors
             Box(Modifier.size(34.dp).elevated(CircleShape, c.borderL2).clip(CircleShape).background(c.floating)
                 .pressable({ follow = true; scope.launch { listState.animateScrollToItem(lastIndex, Int.MAX_VALUE / 2) } }, CircleShape),
-                contentAlignment = Alignment.Center) { Chevron(size = 16.dp, tint = c.labelSecondary) }
+                contentAlignment = Alignment.Center) {
+                Chevron(size = 16.dp, tint = c.labelSecondary)
+                val label = stringResource(R.string.back_to_bottom)
+                Box(Modifier.matchParentSize().semantics { contentDescription = label; role = androidx.compose.ui.semantics.Role.Button })
+            }
         }
     }
 }
@@ -134,7 +141,7 @@ private fun TurnView(
     }
     var open by rememberSaveable(turn.key) { mutableStateOf(defaultOpen) }
     Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        turn.user?.let { UserMessage(it, compact) }
+        turn.user?.let { if (DshNotice.isNotice(it.text)) DshNoticeRow(it.text) else UserMessage(it, compact) }
         if (process.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             if (!running) TurnHeader(turn, open) { open = !open }
@@ -221,7 +228,7 @@ private fun UserMessage(u: UserMsg, compact: Boolean) {
         }
         if (!compact) Row(Modifier.padding(top = 6.dp).height(28.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(Fmt.stamp(context, u.time), style = DshType.xs13, color = c.labelTertiary)
-            IconBtn(R.drawable.dsw_copy_outline, { copyText(context, u.text) }, iconSize = 15.dp, tint = c.labelTertiary)
+            IconBtn(R.drawable.dsw_copy_outline, { copyText(context, u.text) }, iconSize = 15.dp, tint = c.labelTertiary, contentDescription = stringResource(R.string.copy_message))
         }
     }
 }
@@ -231,7 +238,7 @@ private fun TailActions(turn: Turn) {
     val c = Dsh.colors
     val context = LocalContext.current
     Row(Modifier.padding(top = 10.dp).offset(x = (-6).dp), verticalAlignment = Alignment.CenterVertically) {
-        IconBtn(R.drawable.dsw_copy_outline, { copyText(context, turn.reply?.text ?: "") }, iconSize = 17.dp, tint = c.labelTertiary)
+        IconBtn(R.drawable.dsw_copy_outline, { copyText(context, turn.reply?.text ?: "") }, iconSize = 17.dp, tint = c.labelTertiary, contentDescription = stringResource(R.string.copy_reply))
         if (!turn.usage.isEmpty) {
             Spacer(Modifier.width(4.dp))
             Text("↑${Fmt.tokens(turn.usage.input)} ↓${Fmt.tokens(turn.usage.output)}", Modifier.clip(Radius.sm).background(c.selector).padding(horizontal = 8.dp, vertical = 1.dp),
@@ -329,5 +336,29 @@ fun RunningIndicator(live: SessionLive, lastTurn: Turn?) {
             SwimmingWhale(14.dp, c.deepDiving)
             ShimmerText(text, DshType.xxs12.copy(lineHeight = DshType.xxs12.lineHeight), c.deepDiving, true, highlight = c.deepDivingShimmer)
         }
+    }
+}
+
+/**
+ * Prompts DSH itself sends as the user (e.g. the continuation after an engine crash) start with
+ * this marker; they render as a system notice, not as the user's own bubble. SessionStore owns the
+ * texts (CONTINUE_AFTER_CRASH); keep the prefix in sync with it.
+ */
+object DshNotice {
+    const val PREFIX = "[DSH]"
+    fun isNotice(text: String) = text.startsWith(PREFIX)
+    fun isCrashContinuation(text: String) = isNotice(text) && "stopped unexpectedly" in text
+}
+
+@Composable
+private fun DshNoticeRow(text: String) {
+    val c = Dsh.colors
+    val shown = if (DshNotice.isCrashContinuation(text)) stringResource(R.string.dsh_notice_crash) else text.removePrefix(DshNotice.PREFIX).trim()
+    val label = stringResource(R.string.dsh_notice)
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).semantics(mergeDescendants = true) { contentDescription = "$label: $shown" },
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+        Box(Modifier.size(6.dp).clip(CircleShape).background(c.warn))
+        Spacer(Modifier.width(8.dp))
+        Text(shown, Modifier.weight(1f, fill = false), style = DshType.xs13, color = c.labelSecondary)
     }
 }

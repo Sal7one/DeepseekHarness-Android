@@ -97,7 +97,10 @@ fun ToolRow(t: Block.Tool, sessionId: String, onInspect: (String) -> Unit) {
         ToolState.Rejected, ToolState.Stopped -> c.amber
         else -> c.labelTertiary
     }
-    val shots = remember(t.callId, t.state) { if (t.state == ToolState.Done) ShotStore.files(context, sessionId, t.callId) else emptyList() }
+    // Directory listing off the main thread (one per tool row).
+    val shots by androidx.compose.runtime.produceState(emptyList<java.io.File>(), t.callId, t.state) {
+        value = if (t.state == ToolState.Done) kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { ShotStore.files(context, sessionId, t.callId) } else emptyList()
+    }
     Column {
         DisclosureRow(info.icon, stringResource(info.title), summary, open, { open = !open }, live = live, summaryColor = color,
             trailing = if (shots.isNotEmpty() && !open) ({ DIcon(R.drawable.dsw_fullscreen_outline, size = 12.dp, tint = c.labelCaption) }) else null)
@@ -116,7 +119,7 @@ fun ToolRow(t: Block.Tool, sessionId: String, onInspect: (String) -> Unit) {
 @Composable
 fun InspectPill(onClick: () -> Unit) {
     val c = Dsh.colors
-    Row(Modifier.clip(Radius.sm).border(Hairline, c.borderL3, Radius.sm).pressable(onClick, Radius.sm).padding(horizontal = 8.dp, vertical = 3.dp),
+    Row(Modifier.heightIn(min = 28.dp).clip(Radius.sm).border(Hairline, c.borderL3, Radius.sm).pressable(onClick, Radius.sm).padding(horizontal = 10.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         DIcon(R.drawable.dsw_inspect_outline, size = 12.dp, tint = c.labelTertiary)
         Text(stringResource(R.string.inspect), style = DshType.xxs12, color = c.labelTertiary)
@@ -194,10 +197,13 @@ fun StepGroup(key: String, blocks: List<Block>, live: Boolean, sessionId: String
     val c = Dsh.colors
     val groupLive = live && (tools.any { it.state == ToolState.Running } || blocks.last() !is Block.Tool || blocks.last() == tools.last())
     var open by rememberSaveable(key) { mutableStateOf(false) }
-    val expanded = open || (groupLive && live)
+    /** While live the group is forced open; the header can still fold it (until the group finishes). */
+    var liveFolded by rememberSaveable(key) { mutableStateOf(false) }
+    val isLive = groupLive && live
+    val expanded = if (isLive) !liveFolded else open
     val first = remember(tools.first().name) { ToolPresentation.info(tools.first().name) }
     Column {
-        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).pressable({ open = !expanded }, Radius.sm).padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp).pressable({ if (isLive) liveFolded = !liveFolded else open = !open }, Radius.sm).padding(horizontal = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
                 if (expanded) Chevron(open = false) else DIcon(first.icon, size = 14.dp, tint = c.labelTertiary)
             }
@@ -205,7 +211,8 @@ fun StepGroup(key: String, blocks: List<Block>, live: Boolean, sessionId: String
             ShimmerText(ToolPresentation.groupTitle(context, tools, groupLive && live), DshType.row13.copy(fontSize = DshType.s14.fontSize), c.labelTertiary, groupLive && live)
         }
         ExpandBody(expanded) {
-            Column(Modifier.padding(start = 8.dp).heightIn(max = 400.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            // No inner scroller: the chat list scrolls, so the newest (live) step stays in view while following.
+            Column(Modifier.padding(start = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 blocks.forEach { StepBlock(it, live, sessionId, onInspect) }
             }
         }

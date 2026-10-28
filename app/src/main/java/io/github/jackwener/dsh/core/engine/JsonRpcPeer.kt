@@ -2,9 +2,14 @@ package io.github.jackwener.dsh.core.engine
 
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -19,6 +24,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -36,6 +42,10 @@ val RpcJson = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefa
  * `session.event` stream and its `session.status` transitions are only meaningful in order);
  * requests from the peer run concurrently. [onClosed] fires after the last notification that
  * arrived before end-of-stream was handled, so the owner sees a dead channel's tail first.
+ *
+ * Each incoming request runs in its own coroutine under [handlers]; see [EngineCalls] for the
+ * cancellation contract (all in-flight handlers are cancelled when the channel or its engine
+ * generation ends, and a cancelled request is never answered).
  */
 class JsonRpcPeer(
     private val name: String,
@@ -52,6 +62,17 @@ class JsonRpcPeer(
     private val notifications = Channel<Pair<String, JsonObject>>(Channel.UNLIMITED)
     /** Completed once the channel closed and every notification received before that was handled. */
     val closed = CompletableDeferred<Unit>()
+    /** Parent of every in-flight incoming-request handler (child of [scope], so it never outlives it). */
+    private val handlers = SupervisorJob(scope.coroutineContext[Job])
+    private val handlerScope = scope + handlers + CoroutineExceptionHandler { _, e -> Log.e(TAG, "$name handler crashed", e) }
+
+    /**
+     * Cancels every in-flight incoming request with [cause] (their responses are dropped). Called
+     * when the engine generation ends; also happens on its own once the read side reaches EOF.
+     */
+    fun cancelRequests(cause: EngineCallCancelled) {
+        handlers.cancel(cause)
+    }
 
     fun start() {
         scope.launch {
@@ -72,6 +93,8 @@ class JsonRpcPeer(
             } finally {
                 pending.values.forEach { it.completeExceptionally(JsonRpcException(-32000, "$name channel closed")) }
                 pending.clear()
+                // Nobody is left to read a response: stop the handlers (and the device work they drive).
+                cancelRequests(EngineCallCancelled("$name channel closed"))
                 notifications.close()
             }
         }
@@ -81,8 +104,14 @@ class JsonRpcPeer(
         val id = nextId.getAndIncrement()
         val deferred = CompletableDeferred<JsonElement>()
         pending[id] = deferred
-        send(buildJsonObject { put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", params) })
-        return deferred.await()
+        try {
+            send(buildJsonObject { put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", params) })
+            return deferred.await()
+        } catch (e: IOException) {
+            throw JsonRpcException(-32000, "$name channel closed: ${e.message}")
+        } finally {
+            pending.remove(id)
+        }
     }
 
     suspend fun notify(method: String, params: JsonElement = JsonObject(emptyMap())) =
@@ -101,16 +130,21 @@ class JsonRpcPeer(
         val method = msg["method"]?.jsonPrimitive?.contentOrNull
         val params = (msg["params"] as? JsonObject) ?: JsonObject(emptyMap())
         when {
-            method != null && id != null && id !is JsonNull -> scope.launch {
+            method != null && id != null && id !is JsonNull -> handlerScope.launch(EngineCalls.Call(name, method)) {
                 val response = try {
                     buildJsonObject { put("jsonrpc", "2.0"); put("id", id); put("result", onRequest(method, params)) }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (e: JsonRpcException) {
                     errorFrame(id, e.code, e.message ?: "error")
                 } catch (e: Exception) {
                     Log.e(TAG, "$name handler $method failed", e)
                     errorFrame(id, -32603, e.message ?: e.javaClass.simpleName)
                 }
-                send(response)
+                // A handler that finished after its generation ended (or that swallowed the
+                // cancellation) has nobody to answer.
+                ensureActive()
+                try { send(response) } catch (e: IOException) { Log.w(TAG, "$name response to $method dropped: channel closed") }
             }
             method != null -> notifications.trySend(method to params)
             id != null -> {

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.CalendarContract
 import android.provider.CallLog
 import android.provider.ContactsContract
@@ -39,18 +40,40 @@ class CommsTools @Inject constructor(@ApplicationContext private val context: Co
         if (context.checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) throw PermissionMissingException(label)
     }
 
+    private fun smsError(code: Int) = when (code) {
+        SmsManager.RESULT_ERROR_NO_SERVICE -> "no mobile service"
+        SmsManager.RESULT_ERROR_RADIO_OFF -> "radio off / airplane mode"
+        SmsManager.RESULT_ERROR_NULL_PDU -> "invalid message"
+        SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "generic failure (no SIM, or the carrier refused)"
+        else -> "error $code"
+    }
+
+    /** ISO-8601 (with or without offset; a bare date = local midnight) or epoch ms. */
+    private fun time(args: JsonObject, isoKey: String, msKey: String): Long? {
+        args.str(isoKey)?.trim()?.takeIf { it.isNotEmpty() }?.let { v ->
+            val zone = java.time.ZoneId.systemDefault()
+            runCatching { return java.time.OffsetDateTime.parse(v).toInstant().toEpochMilli() }
+            runCatching { return java.time.ZonedDateTime.parse(v).toInstant().toEpochMilli() }
+            runCatching { return java.time.LocalDateTime.parse(v.replace(' ', 'T')).atZone(zone).toInstant().toEpochMilli() }
+            runCatching { return java.time.LocalDateTime.parse(v.replace(' ', 'T') + ":00").atZone(zone).toInstant().toEpochMilli() }
+            runCatching { return java.time.LocalDate.parse(v).atStartOfDay(zone).toInstant().toEpochMilli() }
+            throw InvalidArgsException("'$isoKey' is not ISO-8601 (expected e.g. 2026-10-29T15:00): $v")
+        }
+        return args.long(msKey)
+    }
+
     override val tools = listOf(
         object : Tool("contacts_search", ToolGroup.Comms, Risk.sensitive, false, "Search contacts by name or number.", {
             string("query", "Name or number fragment", required = true)
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 need(Manifest.permission.READ_CONTACTS, "Contacts")
-                val q = "%${args.reqStr("query")}%"
+                val query = args.reqStr("query")
                 val rows = mutableListOf<String>()
-                cr.query(ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                    arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
-                    "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ? OR ${ContactsContract.CommonDataKinds.Phone.NUMBER} LIKE ?",
-                    arrayOf(q, q), null)?.use { c -> while (c.moveToNext() && rows.size < 50) rows += "${c.getString(0)}: ${c.getString(1)}" }
+                // The filter URI matches names and numbers regardless of formatting ("138 0013 8000" vs "13800138000").
+                val uri = android.net.Uri.withAppendedPath(ContactsContract.CommonDataKinds.Phone.CONTENT_FILTER_URI, android.net.Uri.encode(query))
+                cr.query(uri, arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER),
+                    null, null, null)?.use { c -> while (c.moveToNext() && rows.size < 50) rows += "${c.getString(0)}: ${c.getString(1)}" }
                 return ToolResult.text(rows.distinct().joinToString("\n").ifEmpty { "No contacts found." })
             }
         },
@@ -66,7 +89,11 @@ class CommsTools @Inject constructor(@ApplicationContext private val context: Co
                     "${Telephony.Sms.DATE} DESC")?.use { c ->
                     val limit = args.int("limit") ?: 20
                     while (c.moveToNext() && rows.size < limit) {
-                        val dir = if (c.getInt(3) == Telephony.Sms.MESSAGE_TYPE_SENT) "→" else "←"
+                        val dir = when (c.getInt(3)) {
+                            Telephony.Sms.MESSAGE_TYPE_INBOX -> "←"; Telephony.Sms.MESSAGE_TYPE_SENT -> "→"
+                            Telephony.Sms.MESSAGE_TYPE_DRAFT -> "(draft) →"; Telephony.Sms.MESSAGE_TYPE_OUTBOX, Telephony.Sms.MESSAGE_TYPE_QUEUED -> "(sending) →"
+                            Telephony.Sms.MESSAGE_TYPE_FAILED -> "(failed) →"; else -> "?"
+                        }
                         rows += "${fmt.format(Date(c.getLong(2)))} $dir ${c.getString(0)}: ${c.getString(1)}"
                     }
                 }
@@ -88,13 +115,15 @@ class CommsTools @Inject constructor(@ApplicationContext private val context: Co
                 return ToolResult.text(rows.joinToString("\n").ifEmpty { "No calls." })
             }
         },
-        object : Tool("calendar_read", ToolGroup.Comms, Risk.sensitive, false, "Calendar events in a time range (epoch ms; default next 7 days).", {
-            int("fromMs", "Start (epoch ms)"); int("toMs", "End (epoch ms)")
+        object : Tool("calendar_read", ToolGroup.Comms, Risk.sensitive, false,
+            "Calendar events in a time range (default: the next 7 days). Times are ISO-8601 local time like 2026-10-29T15:00 (or epoch ms).", {
+            string("from", "Start, ISO-8601 local time or date"); string("to", "End, ISO-8601 local time or date")
+            int("fromMs", "Start (epoch ms), alternative to from"); int("toMs", "End (epoch ms), alternative to to")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 need(Manifest.permission.READ_CALENDAR, "Calendar")
-                val from = args.long("fromMs") ?: System.currentTimeMillis()
-                val to = args.long("toMs") ?: (from + 7 * 86_400_000L)
+                val from = time(args, "from", "fromMs") ?: System.currentTimeMillis()
+                val to = time(args, "to", "toMs") ?: (from + 7 * 86_400_000L)
                 val uri = CalendarContract.Instances.CONTENT_URI.buildUpon().appendPath(from.toString()).appendPath(to.toString()).build()
                 val rows = mutableListOf<String>()
                 cr.query(uri, arrayOf(CalendarContract.Instances.TITLE, CalendarContract.Instances.BEGIN, CalendarContract.Instances.END, CalendarContract.Instances.EVENT_LOCATION),
@@ -104,26 +133,43 @@ class CommsTools @Inject constructor(@ApplicationContext private val context: Co
                 return ToolResult.text(rows.joinToString("\n").ifEmpty { "No events." })
             }
         },
-        object : Tool("calendar_add", ToolGroup.Comms, Risk.write, false, "Add an event to the primary calendar.", {
-            string("title", "", required = true); int("startMs", "Start epoch ms", required = true); int("endMs", "End epoch ms", required = true)
+        object : Tool("calendar_add", ToolGroup.Comms, Risk.write, false,
+            "Add an event to the user's main writable calendar. Give start/end as ISO-8601 local time (2026-10-29T15:00) — the phone's time zone is applied.", {
+            string("title", "", required = true)
+            string("start", "Start, ISO-8601 local time (or a date for all-day)"); string("end", "End, ISO-8601 local time (default start + 1h)")
+            int("startMs", "Start epoch ms (alternative)"); int("endMs", "End epoch ms (alternative)")
             string("location", ""); string("description", "")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 need(Manifest.permission.WRITE_CALENDAR, "Calendar (write)")
-                val calId = cr.query(CalendarContract.Calendars.CONTENT_URI, arrayOf(CalendarContract.Calendars._ID),
-                    "${CalendarContract.Calendars.IS_PRIMARY}=1", null, null)?.use { if (it.moveToFirst()) it.getLong(0) else null }
-                    ?: cr.query(CalendarContract.Calendars.CONTENT_URI, arrayOf(CalendarContract.Calendars._ID), null, null, null)?.use { if (it.moveToFirst()) it.getLong(0) else null }
-                    ?: throw IllegalStateException("No calendar account on this phone")
+                val allDay = args.str("start")?.trim()?.length == 10
+                // All-day events are stored at UTC midnight per the CalendarContract rules.
+                fun utcDay(k: String) = args.str(k)?.trim()?.takeIf { it.length == 10 }?.let {
+                    runCatching { java.time.LocalDate.parse(it).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli() }.getOrNull() }
+                val start = (if (allDay) utcDay("start") else null) ?: time(args, "start", "startMs")
+                    ?: throw InvalidArgsException("missing 'start' (ISO-8601 like 2026-10-29T15:00)")
+                val end = (if (allDay) utcDay("end")?.plus(if (args.str("end") == args.str("start")) 86_400_000L else 0L) else null)
+                    ?: time(args, "end", "endMs") ?: (start + if (allDay) 86_400_000L else 3_600_000L)
+                if (end < start) throw InvalidArgsException("end is before start")
+                // Writable (contributor+) and visible calendars only; prefer the primary one. The first row
+                // used to be Holidays / Birthdays / a subscription where the event fails or is invisible.
+                val cal = cr.query(CalendarContract.Calendars.CONTENT_URI,
+                    arrayOf(CalendarContract.Calendars._ID, CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, CalendarContract.Calendars.ACCOUNT_NAME),
+                    "${CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL} >= ${CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR} AND ${CalendarContract.Calendars.VISIBLE} = 1",
+                    null, "${CalendarContract.Calendars.IS_PRIMARY} DESC, ${CalendarContract.Calendars._ID} ASC")?.use {
+                    if (it.moveToFirst()) Triple(it.getLong(0), it.getString(1), it.getString(2)) else null
+                } ?: return ToolResult.error("unsupported", "No writable calendar on this phone (add a calendar account, e.g. in the Calendar app).")
                 val uri = cr.insert(CalendarContract.Events.CONTENT_URI, ContentValues().apply {
-                    put(CalendarContract.Events.CALENDAR_ID, calId)
+                    put(CalendarContract.Events.CALENDAR_ID, cal.first)
                     put(CalendarContract.Events.TITLE, args.reqStr("title"))
-                    put(CalendarContract.Events.DTSTART, args.long("startMs") ?: throw InvalidArgsException("startMs"))
-                    put(CalendarContract.Events.DTEND, args.long("endMs") ?: throw InvalidArgsException("endMs"))
-                    put(CalendarContract.Events.EVENT_TIMEZONE, TimeZone.getDefault().id)
+                    put(CalendarContract.Events.DTSTART, start)
+                    put(CalendarContract.Events.DTEND, end)
+                    put(CalendarContract.Events.EVENT_TIMEZONE, if (allDay) "UTC" else TimeZone.getDefault().id)
+                    if (allDay) put(CalendarContract.Events.ALL_DAY, 1)
                     args.str("location")?.let { put(CalendarContract.Events.EVENT_LOCATION, it) }
                     args.str("description")?.let { put(CalendarContract.Events.DESCRIPTION, it) }
-                })
-                return ToolResult.text("Event created: $uri")
+                }) ?: return ToolResult.error("failed", "The calendar provider refused the event.")
+                return ToolResult.text("Event \"${args.reqStr("title")}\" created ${fmt.format(Date(start))}–${fmt.format(Date(end))} in calendar \"${cal.second}\" (${cal.third}). id=${uri.lastPathSegment}")
             }
         },
         object : Tool("sms_send", ToolGroup.Comms, Risk.dangerous, false, "Send an SMS. Always confirm recipient and text with the user first.", {
@@ -131,9 +177,36 @@ class CommsTools @Inject constructor(@ApplicationContext private val context: Co
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 need(Manifest.permission.SEND_SMS, "Send SMS")
-                val sms = context.getSystemService(SmsManager::class.java)
-                sms.sendMultipartTextMessage(args.reqStr("to"), null, sms.divideMessage(args.reqStr("text")), null, null)
-                return ToolResult.text("SMS sent to ${args.reqStr("to")}")
+                val to = args.reqStr("to"); val text = args.reqStr("text")
+                @Suppress("DEPRECATION")
+                val sms = (if (Build.VERSION.SDK_INT >= 31) context.getSystemService(SmsManager::class.java) else null) ?: SmsManager.getDefault()
+                val parts = sms.divideMessage(text)
+                // Report what the radio says instead of assuming success (no SIM / no service / airplane mode).
+                val action = "${context.packageName}.SMS_SENT.${java.util.UUID.randomUUID()}"
+                val results = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+                val all = kotlinx.coroutines.CompletableDeferred<Unit>()
+                val receiver = object : android.content.BroadcastReceiver() {
+                    override fun onReceive(c: Context, i: android.content.Intent) {
+                        results[i.getIntExtra("part", -1)] = resultCode
+                        if (results.size >= parts.size) all.complete(Unit)
+                    }
+                }
+                androidx.core.content.ContextCompat.registerReceiver(context, receiver, android.content.IntentFilter(action), androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+                try {
+                    val sent = ArrayList(parts.indices.map { idx ->
+                        android.app.PendingIntent.getBroadcast(context, idx, android.content.Intent(action).setPackage(context.packageName).putExtra("part", idx),
+                            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_ONE_SHOT)
+                    })
+                    sms.sendMultipartTextMessage(to, null, parts, sent, null)
+                    kotlinx.coroutines.withTimeoutOrNull(30_000) { all.await() }
+                } finally { runCatching { context.unregisterReceiver(receiver) } }
+                val failed = results.values.filter { it != android.app.Activity.RESULT_OK }
+                return when {
+                    results.isEmpty() -> ToolResult.text("SMS to $to was handed to the phone (${parts.size} part(s)) but no delivery report came within 30s; check the Messages app before resending.")
+                    failed.isEmpty() && results.size >= parts.size -> ToolResult.text("SMS sent to $to (${parts.size} part(s)).")
+                    failed.isEmpty() -> ToolResult.text("SMS to $to: ${results.size}/${parts.size} part(s) confirmed sent, the rest unconfirmed; check the Messages app before resending.")
+                    else -> ToolResult.error("sms_failed", "SMS to $to failed (${failed.map(::smsError).distinct().joinToString()}). Do not retry blindly; tell the user.")
+                }
             }
         },
     )

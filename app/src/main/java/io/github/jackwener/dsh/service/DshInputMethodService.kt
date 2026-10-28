@@ -48,6 +48,17 @@ class DshInputMethodService : InputMethodService() {
         return ok
     }
 
+    /** Performs the field's editor action (Enter / Search / Go / Send). */
+    fun editorAction(search: Boolean): Boolean {
+        val ic = currentInputConnection ?: return false
+        val declared = (editor?.imeOptions ?: 0) and EditorInfo.IME_MASK_ACTION
+        if (search) return ic.performEditorAction(EditorInfo.IME_ACTION_SEARCH)
+        if (declared == EditorInfo.IME_ACTION_NONE || declared == EditorInfo.IME_ACTION_UNSPECIFIED || ((editor?.imeOptions ?: 0) and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0)
+            return ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER)) &&
+                ic.sendKeyEvent(android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER))
+        return ic.performEditorAction(declared)
+    }
+
     companion object {
         @Volatile var instance: DshInputMethodService? = null
             private set

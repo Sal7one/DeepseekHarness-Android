@@ -28,7 +28,18 @@ data class ToolDescriptor(
     val inputSchema: JsonObject,
     val risk: Risk,
     val needsUnlock: Boolean,
-)
+    /**
+     * The single source of truth for this tool's time budget (docs/ENGINE-CONTRACT.md §3.1). The
+     * plugin uses it as the dsh tool timeout and sends it back in `capability/invoke`; the app answers
+     * (or gives up waiting for the user) before it runs out, so a timed-out call never acts later.
+     */
+    val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+) {
+    companion object {
+        const val DEFAULT_TIMEOUT_MS = 5 * 60_000L
+        const val UNLOCK_TIMEOUT_MS = 15 * 60_000L
+    }
+}
 
 sealed interface Content {
     data class Text(val text: String) : Content
@@ -48,7 +59,25 @@ class ToolResult(val ok: Boolean, val content: List<Content>, val errorCode: Str
 open class PermissionMissingException(val what: String) : Exception(what)
 class InvalidArgsException(message: String) : Exception(message)
 
-data class CallContext(val sessionId: String, val callId: String, val unattended: Boolean)
+/**
+ * One capability call. [deadlineMs] (SystemClock.elapsedRealtime) bounds every wait for the user;
+ * [waitingFor] names what the call is blocked on so a timeout can say "waiting for the user" rather
+ * than "failed".
+ */
+class CallContext(
+    val sessionId: String,
+    val callId: String,
+    val unattended: Boolean,
+    val deadlineMs: Long = Long.MAX_VALUE,
+) {
+    @Volatile var waitingFor: String? = null
+
+    /** Runs a user-facing wait, recording what it waits for (cleared when it ends or is cancelled). */
+    suspend fun <T> waitFor(what: String, block: suspend () -> T): T {
+        waitingFor = what
+        try { return block() } finally { waitingFor = null }
+    }
+}
 
 abstract class Tool(
     val name: String,
@@ -61,8 +90,10 @@ abstract class Tool(
     val shell: ShellUse = ShellUse.None,
     /** What happens without Shizuku (model-facing, e.g. "open the Wi-Fi panel for the user to tap"). */
     val shellFallback: String? = null,
+    /** See [ToolDescriptor.timeoutMs]. */
+    timeoutMs: Long = if (needsUnlock) ToolDescriptor.UNLOCK_TIMEOUT_MS else ToolDescriptor.DEFAULT_TIMEOUT_MS,
 ) {
-    val descriptor = ToolDescriptor(name, group.id, description, SchemaBuilder().apply(schema).build(), risk, needsUnlock)
+    val descriptor = ToolDescriptor(name, group.id, description, SchemaBuilder().apply(schema).build(), risk, needsUnlock, timeoutMs)
     abstract suspend fun invoke(args: JsonObject, call: CallContext): ToolResult
 }
 
@@ -97,9 +128,16 @@ class SchemaBuilder {
 
 fun JsonObject.str(k: String): String? = (this[k] as? JsonPrimitive)?.contentOrNull
 fun JsonObject.reqStr(k: String): String = str(k)?.takeIf { it.isNotEmpty() } ?: throw InvalidArgsException("missing '$k'")
-fun JsonObject.int(k: String): Int? = (this[k] as? JsonPrimitive)?.intOrNull
-fun JsonObject.long(k: String): Long? = (this[k] as? JsonPrimitive)?.longOrNull
+fun JsonObject.int(k: String): Int? = (this[k] as? JsonPrimitive)?.let { p ->
+    p.intOrNull ?: p.doubleOrNull?.takeIf { it.isFinite() && it >= Int.MIN_VALUE && it <= Int.MAX_VALUE }?.let { Math.round(it).toInt() }
+}
+fun JsonObject.long(k: String): Long? = (this[k] as? JsonPrimitive)?.let { p -> p.longOrNull ?: p.doubleOrNull?.takeIf { it.isFinite() }?.let { Math.round(it) } }
 fun JsonObject.double(k: String): Double? = (this[k] as? JsonPrimitive)?.doubleOrNull
-fun JsonObject.bool(k: String): Boolean? = (this[k] as? JsonPrimitive)?.booleanOrNull
-fun JsonObject.strs(k: String): List<String> = (this[k] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull } ?: emptyList()
+fun JsonObject.bool(k: String): Boolean? = (this[k] as? JsonPrimitive)?.let { p -> p.booleanOrNull ?: p.contentOrNull?.lowercase()?.toBooleanStrictOrNull() }
+/** A string array; a single string is accepted as a one-element list (models often send that). */
+fun JsonObject.strs(k: String): List<String> = when (val v = this[k]) {
+    is JsonArray -> v.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+    is JsonPrimitive -> listOfNotNull(v.contentOrNull?.takeIf { it.isNotEmpty() })
+    else -> emptyList()
+}
 fun JsonElement?.asList(): List<JsonElement> = (this as? JsonArray)?.jsonArray ?: emptyList()

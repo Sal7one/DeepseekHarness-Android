@@ -27,31 +27,72 @@ import javax.inject.Singleton
 @Singleton
 class TextInput @Inject constructor(@ApplicationContext private val context: Context, private val shizuku: ShizukuShell) {
 
-    /** Returns the method that worked, or null when every path failed. */
-    suspend fun type(svc: DshAccessibilityService, target: AccessibilityNodeInfo?, text: String, append: Boolean): String? {
-        val full = if (append) (target?.text?.toString().orEmpty() + text) else text
+    /** How text got in, plus what the field shows afterwards (null when it cannot be read back). */
+    class Typed(val method: String, val fieldText: String?)
+
+    /**
+     * Returns how the text was entered, or null when every path failed. Before each fallback the field
+     * is re-read: if it changed at all, an earlier path did commit something (masked/reformatting
+     * fields fail a strict check), so we stop rather than type the text a second time.
+     */
+    suspend fun type(svc: DshAccessibilityService, target: AccessibilityNodeInfo?, text: String, append: Boolean): Typed? {
+        val before = target?.text?.toString()
+        val full = if (append) (before.orEmpty() + text) else text
+        fun done(method: String) = Typed(method, readBack(target))
+        fun changed(): Boolean {
+            if (target == null || target.isPassword) return false
+            target.refresh()
+            return target.text?.toString() != before
+        }
         if (target != null && target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, full)
-            }) && verify(target, text)) return "set_text"
+            })) {
+            if (verify(target, text)) return done("set_text")
+            if (changed()) return done("set_text (partial: the field reformatted the text; check it)")
+        }
 
         target?.let { focus(it) }
-        if (svc.commitViaA11yInput(text, replace = !append) && verify(target, text, trustWithoutNode = true)) return "a11y_input"
-        if (DshInputMethodService.isCurrent(context) && DshInputMethodService.instance?.commit(text, replace = !append) == true &&
-            verify(target, text, trustWithoutNode = true)) return "dsh_ime"
+        if (svc.commitViaA11yInput(text, replace = !append)) {
+            if (verify(target, text, trustWithoutNode = true)) return done("a11y_input" + unverified(target))
+            if (changed()) return done("a11y_input (partial: the field reformatted the text; check it)")
+        }
+        if (DshInputMethodService.isCurrent(context) && DshInputMethodService.instance?.commit(text, replace = !append) == true) {
+            if (verify(target, text, trustWithoutNode = true)) return done("dsh_ime" + unverified(target))
+            if (changed()) return done("dsh_ime (partial: the field reformatted the text; check it)")
+        }
 
         if (shizuku.available) {
             if (text.all { it.code in 0x20..0x7e }) {
                 if (!append && target != null) clear(target)
-                if (shizuku.exec("input text ${shellQuote(text.replace(" ", "%s"))}").code == 0 && verify(target, text, trustWithoutNode = true)) return "shizuku_input"
-            } else if (viaImeSwitch(text, !append) && verify(target, text, trustWithoutNode = true)) return "shizuku_ime"
+                if (shizuku.exec("input text ${shellQuote(text.replace(" ", "%s"))}").code == 0) {
+                    if (verify(target, text, trustWithoutNode = true)) return done("shizuku_input" + unverified(target))
+                    if (changed()) return done("shizuku_input (partial: the field reformatted the text; check it)")
+                }
+            } else if (viaImeSwitch(text, !append)) {
+                if (verify(target, text, trustWithoutNode = true)) return done("shizuku_ime" + unverified(target))
+                if (changed()) return done("shizuku_ime (partial: the field reformatted the text; check it)")
+            }
         }
 
         if (target != null) {
-            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("dsh", text))
+            val cm = context.getSystemService(ClipboardManager::class.java)
+            val saved = runCatching { cm.primaryClip }.getOrNull()
+            cm.setPrimaryClip(ClipData.newPlainText("dsh", text))
             if (!append) clear(target)
-            if (target.performAction(AccessibilityNodeInfo.ACTION_PASTE) && verify(target, text)) return "paste"
+            val ok = target.performAction(AccessibilityNodeInfo.ACTION_PASTE) && (verify(target, text) || changed())
+            // Give the user's clipboard back (paste is synchronous for the target app by now).
+            runCatching { if (saved != null) cm.setPrimaryClip(saved) else if (android.os.Build.VERSION.SDK_INT >= 28) cm.clearPrimaryClip() }
+            if (ok) return done("paste")
         }
         return null
+    }
+
+    private fun unverified(n: AccessibilityNodeInfo?) = if (n == null) " (no field to read back; verify on screen)" else ""
+
+    private fun readBack(n: AccessibilityNodeInfo?): String? {
+        if (n == null || n.isPassword) return null
+        n.refresh()
+        return n.text?.toString()
     }
 
     private fun focus(n: AccessibilityNodeInfo) {
@@ -85,10 +126,14 @@ class TextInput @Inject constructor(@ApplicationContext private val context: Con
     private suspend fun verify(n: AccessibilityNodeInfo?, expected: String, trustWithoutNode: Boolean = false): Boolean {
         if (n == null) return trustWithoutNode
         if (n.isPassword) return true
-        delay(150)
-        n.refresh()
-        val now = n.text?.toString() ?: return false
-        return now.contains(expected) || now.replace(Regex("\\s"), "").contains(expected.replace(Regex("\\s"), ""))
+        // Editors update their text asynchronously; poll for ~600 ms before calling it a failure.
+        repeat(4) {
+            delay(150)
+            n.refresh()
+            val now = n.text?.toString()
+            if (now != null && (now.contains(expected) || now.replace(Regex("\\s"), "").contains(expected.replace(Regex("\\s"), "")))) return true
+        }
+        return false
     }
 
     private fun shellQuote(s: String) = "'" + s.replace("'", "'\\''") + "'"

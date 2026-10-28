@@ -22,6 +22,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -73,13 +75,14 @@ import io.github.jackwener.dsh.feature.settings.isZh
 @Composable
 private fun AttentionCard(strip: String, answered: Boolean, body: @Composable ColumnScope.() -> Unit, actions: @Composable () -> Unit) {
     val c = Dsh.colors
-    Column(Modifier.fillMaxWidth().elevated(Radius.xl, c.warnSecondary, 6.dp).border(1.dp, c.warnSecondary, Radius.xl).clip(Radius.xl).background(c.inputMajor)) {
+    val settled = rememberSettled(400)
+    Column(Modifier.fillMaxWidth().ignoreTapsUntil(settled).elevated(Radius.xl, c.warnSecondary, 6.dp).border(1.dp, c.warnSecondary, Radius.xl).clip(Radius.xl).background(c.inputMajor)) {
         Row(Modifier.fillMaxWidth().background(c.warnTertiary).padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             if (answered) Spinner(10.dp, c.warn) else Box(Modifier.size(6.dp).clip(CircleShape).background(c.warn))
             Spacer(Modifier.width(8.dp))
             Text(strip, style = DshType.xs13.copy(lineHeight = DshType.xxs12.lineHeight), color = c.warnLabel)
         }
-        Column(Modifier.heightIn(max = 336.dp).verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = body)
+        Column(Modifier.weight(1f, fill = false).heightIn(max = 336.dp).verticalScroll(rememberScrollState()).padding(start = 16.dp, end = 16.dp, top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = body)
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) { actions() }
     }
 }
@@ -90,6 +93,7 @@ fun ApprovalCard(a: PendingApproval, onAnswer: (ApprovalOutcome) -> Unit) {
     val c = Dsh.colors
     val context = LocalContext.current
     var answered by remember(a.requestKey) { mutableStateOf(false) }
+    ReenableAfter(answered) { answered = false }
     val info = ToolPresentation.info(a.toolName)
     val pseudo = Block.Tool("", a.callId ?: "", a.toolName, a.arguments ?: "", parseArgs(a.arguments), ToolState.Running, null, null, null, 0, null)
     val summary = ToolPresentation.summary(context, pseudo)
@@ -147,8 +151,12 @@ private fun SystemPermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Un
     val item = remember(p.permissionId) { p.permissionId?.let { PermissionCatalog.byId(it) } }
     var launched by remember(p.requestKey) { mutableStateOf(false) }
     var answered by remember(p.requestKey) { mutableStateOf(false) }
+    ReenableAfter(answered) { answered = false }
+    /** "Don't ask again": the system dialog no longer shows, so 去授权 opens the app's settings page. */
+    var blocked by remember(p.requestKey) { mutableStateOf(false) }
     val runtime = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
-        if (res.values.any { it }) { answered = true; onAnswer(true) } else launched = true
+        if (res.values.any { it }) { answered = true; onAnswer(true) }
+        else { launched = true; blocked = PermissionCatalog.permanentlyDenied(context, res.keys) }
     }
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner, item, launched) {
@@ -162,13 +170,15 @@ private fun SystemPermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Un
         Text(item?.title(zh) ?: p.what, style = DshType.s14m.copy(lineHeight = DshType.base16.lineHeight), color = c.labelPrimary)
         Text(stringResource(R.string.perm_card_body, stringResource(ToolPresentation.info(p.toolName).title)), style = DshType.xs13, color = c.labelSecondary)
         item?.why(zh)?.let { Text(it, style = DshType.xs13, color = c.labelTertiary) }
-        if (item?.restrictedSetting == true) Text(stringResource(R.string.restricted_hint), style = DshType.xxs12, color = c.labelCaption)
-        if (item == null) Text(stringResource(R.string.perm_card_manual), style = DshType.xxs12, color = c.labelCaption)
+        if (blocked) Text(stringResource(R.string.perm_denied_forever), style = DshType.xxs12, color = c.labelSecondary)
+        if (item?.restrictedSetting == true) Text(stringResource(R.string.restricted_hint), style = DshType.xxs12, color = c.labelSecondary)
+        if (item == null) Text(stringResource(R.string.perm_card_manual), style = DshType.xxs12, color = c.labelSecondary)
     }) {
         DButton(stringResource(R.string.reject), { answered = true; onAnswer(false) }, variant = BtnVariant.Outline, enabled = !answered)
-        if (item != null) DButton(stringResource(R.string.go_grant), {
+        if (item != null) DButton(stringResource(if (blocked) R.string.open_system_settings else R.string.go_grant), {
             val rt = item.runtime
-            if (rt != null) runtime.launch(rt.toTypedArray())
+            if (rt != null && !blocked) runtime.launch(rt.toTypedArray())
+            else if (rt != null) runCatching { context.startActivity(PermissionCatalog.appDetails(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
             else (item.intent(context) ?: PermissionCatalog.appDetails(context)).let { i ->
                 runCatching { context.startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     .onFailure { context.startActivity(PermissionCatalog.appDetails(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
@@ -184,6 +194,7 @@ private fun SystemPermissionCard(p: PendingPermission, onAnswer: (Boolean) -> Un
 fun TakeoverCard(t: PendingTakeover, onAnswer: (Boolean) -> Unit) {
     val c = Dsh.colors
     var answered by remember(t.requestKey) { mutableStateOf(false) }
+    ReenableAfter(answered) { answered = false }
     AttentionCard(stringResource(R.string.takeover_title), answered, body = {
         Text(stringResource(R.string.takeover_body), style = DshType.s14m.copy(lineHeight = DshType.base16.lineHeight), color = c.labelPrimary)
         Text(t.reason, style = DshType.xs13, color = c.labelSecondary)
@@ -203,8 +214,10 @@ fun QuestionCard(q: PendingQuestion, onSubmit: (Map<String, Pair<List<String>, S
     var submitting by remember(q.requestKey) { mutableStateOf(false) }
     var invalid by remember(q.requestKey) { mutableStateOf(false) }
     val question = q.questions.getOrNull(page) ?: return
-    Column(Modifier.fillMaxWidth().elevated(Radius.xl, c.borderL2, 6.dp).clip(Radius.xl).background(c.inputMajor)) {
-        Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()).padding(start = 18.dp, end = 12.dp, top = 12.dp)) {
+    val settled = rememberSettled(400)
+    LaunchedEffect(submitting) { if (submitting) { delay(15_000); submitting = false } }
+    Column(Modifier.fillMaxWidth().ignoreTapsUntil(settled).elevated(Radius.xl, c.borderL2, 6.dp).clip(Radius.xl).background(c.inputMajor)) {
+        Column(Modifier.weight(1f, fill = false).heightIn(max = 460.dp).verticalScroll(rememberScrollState()).padding(start = 18.dp, end = 12.dp, top = 12.dp)) {
             question.header?.let { Text(it, style = DshType.xxxs11, color = c.labelTertiary) }
             Text(question.text, style = DshType.base16m.copy(fontSize = DshType.base16.fontSize * 0.94f, lineHeight = DshType.base16.lineHeight), color = c.labelPrimary)
             question.detail?.let { Text(it, Modifier.padding(top = 4.dp), style = DshType.xs13, color = c.labelSecondary) }
@@ -218,13 +231,13 @@ fun QuestionCard(q: PendingQuestion, onSubmit: (Map<String, Pair<List<String>, S
                         val cur = selected[question.id] ?: emptySet()
                         selected[question.id] = if (question.multi) (if (on) cur - opt.label else cur + opt.label) else setOf(opt.label)
                     }, Radius.md).padding(6.dp), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (question.multi) Box(Modifier.padding(top = 4.dp)) { DCheckbox(on, {}) }
+                    if (question.multi) Box(Modifier.padding(top = 4.dp)) { DCheckbox(on, null) }
                     else Box(Modifier.padding(top = 2.dp).size(20.dp).clip(Radius.xs).background(if (on) c.brandPrimary else c.selector), contentAlignment = Alignment.Center) {
                         Text("${i + 1}", style = DshType.xxs12m, color = if (on) c.labelOnPrimary else c.labelSecondary)
                     }
                     Column(Modifier.weight(1f)) {
                         Text(opt.label, style = DshType.s14m.copy(lineHeight = DshType.body.lineHeight), color = c.labelPrimary)
-                        opt.description?.let { Text(it, style = DshType.xs13, color = c.labelTertiary, maxLines = 2) }
+                        opt.description?.let { Text(it, style = DshType.xs13, color = c.labelTertiary, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
                     }
                 }
             }
@@ -235,9 +248,9 @@ fun QuestionCard(q: PendingQuestion, onSubmit: (Map<String, Pair<List<String>, S
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             if (q.questions.size > 1) {
-                IconBtn(R.drawable.dsw_chevron_left_outline, { page-- }, enabled = page > 0)
+                IconBtn(R.drawable.dsw_chevron_left_outline, { page-- }, enabled = page > 0, contentDescription = stringResource(R.string.prev_question))
                 Text("${page + 1} / ${q.questions.size}", style = DshType.xxs12, color = c.labelTertiary)
-                IconBtn(R.drawable.dsw_chevron_right_outline, { page++ }, enabled = page < q.questions.lastIndex)
+                IconBtn(R.drawable.dsw_chevron_right_outline, { page++ }, enabled = page < q.questions.lastIndex, contentDescription = stringResource(R.string.next))
             }
             Spacer(Modifier.weight(1f))
             DButton(stringResource(R.string.skip), onSkip, variant = BtnVariant.Outline, enabled = !submitting)
@@ -256,3 +269,9 @@ fun QuestionCard(q: PendingQuestion, onSubmit: (Map<String, Pair<List<String>, S
 
 @Composable
 fun FieldLabel(text: String) = Text(text, style = DshType.xs13.copy(fontWeight = FontWeight(500)), color = Dsh.colors.labelSecondary)
+
+/** A card stays answered (buttons disabled) while the reply is in flight; re-enable if it is still here after a while. */
+@Composable
+private fun ReenableAfter(answered: Boolean, ms: Long = 15_000, reset: () -> Unit) {
+    LaunchedEffect(answered) { if (answered) { delay(ms); reset() } }
+}

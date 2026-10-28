@@ -75,7 +75,7 @@ fun HomeScreen(vm: HomeViewModel, onSettings: (String?) -> Unit, onAutomation: (
                     onNew = { vm.newSession(null); scope.launch { drawer.close() } },
                     onOpen = { vm.open(it); scope.launch { drawer.close() } },
                     onAutomation = { scope.launch { drawer.close() }; onAutomation() },
-                    onSettings = { scope.launch { drawer.close() }; onSettings(null) },
+                    onSettings = { section -> scope.launch { drawer.close() }; onSettings(section) },
                     onClose = { scope.launch { drawer.close() } },
                     onRename = vm::rename, onPin = vm::pin, onArchive = vm::archive, onDelete = vm::delete,
                 )
@@ -99,7 +99,6 @@ private fun ConversationPane(vm: HomeViewModel, onMenu: () -> Unit, onSettings: 
         if (live.sessionId == vm.id) prefill?.let { composer.text = it; vm.prefill.value = null }
     }
     val empty = conv.isEmpty && !live.running
-    val listState = rememberLazyListState()
     BackHandler(view == SessionView.Trajectory) { vm.view.value = SessionView.Chat }
 
     Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
@@ -107,21 +106,35 @@ private fun ConversationPane(vm: HomeViewModel, onMenu: () -> Unit, onSettings: 
             IconBtn(R.drawable.dsw_panel_left_outline, onMenu, size = 40.dp, iconSize = 18.dp, tint = c.labelPrimary, contentDescription = stringResource(R.string.open_sidebar))
             Text(if (empty) "" else live.title.ifBlank { conv.turns.firstOrNull()?.user?.text?.lineSequence()?.firstOrNull() ?: stringResource(R.string.new_session) },
                 Modifier.weight(1f).padding(horizontal = 4.dp), style = DshType.s14m, color = c.labelPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (!empty) Segmented(listOf(stringResource(R.string.view_chat), stringResource(R.string.view_trajectory)), view.ordinal,
-                { vm.view.value = SessionView.entries[it] }, compact = true)
-            IconBtn(R.drawable.dsw_new_chat_outline, { vm.newSession(null) }, size = 40.dp, iconSize = 18.dp, tint = c.labelPrimary, contentDescription = stringResource(R.string.new_session))
+            // 对话 / 轨迹: one icon toggle instead of a segmented control, so the title keeps its room at 360 dp.
+            if (!empty) {
+                val traj = view == SessionView.Trajectory
+                IconBtn(if (traj) R.drawable.dsw_flat_list_outline else R.drawable.dsw_inspect_outline,
+                    { vm.view.value = if (traj) SessionView.Chat else SessionView.Trajectory }, size = 40.dp, iconSize = 18.dp,
+                    tint = if (traj) c.labelPrimary else c.labelSecondary,
+                    contentDescription = stringResource(if (traj) R.string.view_chat else R.string.view_trajectory))
+            }
+            // Nothing to leave on the empty home, so no 新会话 there.
+            if (!empty) IconBtn(R.drawable.dsw_new_chat_outline, { vm.newSession(null) }, size = 40.dp, iconSize = 18.dp, tint = c.labelPrimary, contentDescription = stringResource(R.string.new_session))
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             AnimatedContent(Triple(view, empty, live.sessionId), transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "pane") { (v, isEmpty, _) ->
                 when {
                     v == SessionView.Trajectory -> TrajectoryView(vm)
                     isEmpty -> EmptyHero(vm, composer, settings, live, conv, onAutomation)
-                    else -> ChatStream(conv, live, settings.workDetails, listState, onInspect = vm::inspect, onRetry = vm::retry, onOpenSettings = { onSettings(it) }, modifier = Modifier.fillMaxSize())
+                    // One list state per session (and per crossfading pane), so positions never leak across sessions.
+                    else -> ChatStream(conv, live, settings.workDetails, rememberLazyListState(), onInspect = vm::inspect, onRetry = vm::retry, onOpenSettings = { onSettings(it) }, modifier = Modifier.fillMaxSize())
                 }
             }
         }
         if (!empty && view == SessionView.Chat) BottomDock(vm, composer, settings, live, conv, onAutomation)
-        else if (view == SessionView.Trajectory) Spacer(Modifier.navigationBarsPadding())
+        else if (view == SessionView.Trajectory) {
+            // Trajectory has no composer: keep the run stoppable from here.
+            if (live.running) Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(8.dp), contentAlignment = Alignment.Center) {
+                io.github.jackwener.dsh.core.designsystem.DButton(stringResource(R.string.stop_generating), { vm.stop() },
+                    variant = io.github.jackwener.dsh.core.designsystem.BtnVariant.Outline, icon = R.drawable.dsw_stop_fill)
+            } else Spacer(Modifier.navigationBarsPadding())
+        }
     }
 }
 
@@ -157,7 +170,16 @@ private fun BottomDock(vm: HomeViewModel, composer: ComposerState, settings: Set
 /** First non-null wins: permission card, approval card, question card, composer. */
 @Composable
 fun ComposerSlot(vm: ConversationController, composer: ComposerState, settings: Settings, live: SessionLive, conv: Conversation, hero: Boolean,
-                 onAutomation: (() -> Unit)? = null, showChips: Boolean = true, prepare: (String) -> String = { it }) {
+                 onAutomation: (() -> Unit)? = null, showChips: Boolean = true, canSendEmpty: Boolean = false,
+                 prepare: (String) -> String = { it }) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val modelChangePending by vm.modelChangePending.collectAsStateWithLifecycle()
+    // Queued messages the run never sent (stopped / failed) come back into the composer.
+    LaunchedEffect(live.sessionId, live.restoredDraft) {
+        val draft = live.restoredDraft ?: return@LaunchedEffect
+        composer.text = listOf(draft, composer.text).filter { it.isNotBlank() }.joinToString("\n\n")
+        vm.consumeRestoredDraft()
+    }
     when {
         live.takeover != null -> TakeoverCard(live.takeover) { vm.answerTakeover(live.takeover.requestKey, it) }
         live.permission != null -> PermissionCard(live.permission) { vm.answerPermission(live.permission.requestKey, it) }
@@ -166,7 +188,7 @@ fun ComposerSlot(vm: ConversationController, composer: ComposerState, settings: 
         else -> Composer(
             composer, live.running, live.preset, vm::setPreset, settings.model, settings.effort, vm::setModel, vm::setEffort, conv.contextTokens,
             onSend = {
-                val text = prepare(composer.text.trim())
+                val text = prepare(composer.outgoingText(context))
                 val images = composer.images.map { it.mime to it.base64 }
                 composer.clear()
                 vm.send(text, images, now = settings.busySend == io.github.jackwener.dsh.core.data.BusySend.Steer)
@@ -179,6 +201,8 @@ fun ComposerSlot(vm: ConversationController, composer: ComposerState, settings: 
                 onAutomation = onAutomation,
             ),
             showChips = showChips,
+            canSendEmpty = canSendEmpty,
+            modelChangePending = modelChangePending,
         )
     }
 }

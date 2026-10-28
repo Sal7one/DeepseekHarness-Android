@@ -5,6 +5,7 @@ import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
+import io.github.jackwener.dsh.core.designsystem.findActivity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -37,6 +38,16 @@ object PermissionCatalog {
     private fun granted(c: Context, p: String) = c.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     fun appDetails(c: Context) = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, pkgUri(c))
+
+    /**
+     * After a denied request: true when none of [perms] can be asked again ("don't ask again", or
+     * the second denial on Android 11+), so only the app's settings page can grant them.
+     */
+    fun permanentlyDenied(c: Context, perms: Collection<String>): Boolean {
+        val act = c.findActivity() ?: return false
+        return perms.isNotEmpty() && perms.none { androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(act, it) } &&
+            perms.none { androidx.core.content.ContextCompat.checkSelfPermission(c, it) == android.content.pm.PackageManager.PERMISSION_GRANTED }
+    }
 
     val all: List<PermissionItem> = listOf(
         PermissionItem("notifications", "通知", "Notifications", "任务完成、需要确认时提醒你", "Tell you when tasks finish or need approval",

@@ -19,6 +19,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -100,14 +102,14 @@ fun Modifier.pressable(onClick: () -> Unit, shape: Shape = Radius.md, enabled: B
         onLongClick = onLongClick, onClick = onClick)
 }
 
-/** 28 dp icon button (dsh compact icon button, R8) with a 40 dp touch target. */
+/** Compact icon button (dsh R8 icon button): a 40 dp box; Compose extends the touch target to 48 dp. */
 @Composable
 fun IconBtn(
     @DrawableRes res: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     contentDescription: String? = null,
-    size: Dp = 32.dp,
+    size: Dp = 40.dp,
     iconSize: Dp = 16.dp,
     tint: Color = Dsh.colors.labelSecondary,
     enabled: Boolean = true,
@@ -161,8 +163,8 @@ fun DSwitch(checked: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = tr
     val c = Dsh.colors
     val x by animateFloatAsState(if (checked) 1f else 0f, tween(120), label = "switch")
     Box(
-        Modifier.size(44.dp, 32.dp).alpha(if (enabled) 1f else 0.5f)
-            .clickable(remember { MutableInteractionSource() }, null, enabled = enabled, role = Role.Switch) { onChange(!checked) },
+        Modifier.size(48.dp, 40.dp).alpha(if (enabled) 1f else 0.5f)
+            .toggleable(checked, remember { MutableInteractionSource() }, null, enabled = enabled, role = Role.Switch, onValueChange = onChange),
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.size(36.dp, 20.dp).clip(CircleShape).background(if (checked) c.info else c.labelDimmed)) {
@@ -173,10 +175,13 @@ fun DSwitch(checked: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = tr
 }
 
 @Composable
-fun DCheckbox(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+fun DCheckbox(checked: Boolean, onChange: ((Boolean) -> Unit)?, modifier: Modifier = Modifier) {
     val c = Dsh.colors
+    // onChange = null: the whole row is the toggle (it carries the semantics), the box is decoration.
     Box(modifier.size(16.dp).clip(Radius.xs).background(if (checked) c.brandPrimary else Color.Transparent)
-        .border(if (checked) 0.dp else 1.dp, c.borderL4, Radius.xs).clickable { onChange(!checked) }, contentAlignment = Alignment.Center) {
+        .border(if (checked) 0.dp else 1.dp, c.borderL4, Radius.xs)
+        .then(if (onChange != null) Modifier.toggleable(checked, role = Role.Checkbox, onValueChange = onChange) else Modifier),
+        contentAlignment = Alignment.Center) {
         if (checked) DIcon(R.drawable.dsw_check_outline, size = 12.dp, tint = c.labelOnPrimary)
     }
 }
@@ -327,7 +332,7 @@ fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit, mod
             Box(
                 (if (compact) Modifier else Modifier.weight(1f)).clip(Radius.sm)
                     .then(if (on) Modifier.shadow(1.dp, Radius.sm).background(if (c.isDark) c.bgLayer3 else Color.White) else Modifier)
-                    .clickable { onSelect(i) }
+                    .selectable(on, role = Role.Tab) { onSelect(i) }
                     .padding(horizontal = if (compact) 12.dp else 10.dp, vertical = if (compact) 3.dp else 6.dp),
                 contentAlignment = Alignment.Center,
             ) { Text(label, style = DshType.xs13m, color = if (on) c.labelPrimary else c.labelTertiary, maxLines = 1) }
@@ -339,10 +344,16 @@ fun Segmented(options: List<String>, selected: Int, onSelect: (Int) -> Unit, mod
 
 /** dsh Menu: R16 surface, 4 dp padding, near-opaque menu fill, hairline stroke. */
 @Composable
-fun DMenu(expanded: Boolean, onDismiss: () -> Unit, modifier: Modifier = Modifier, offset: DpOffset = DpOffset(0.dp, 4.dp), content: @Composable ColumnScope.() -> Unit) {
+fun DMenu(
+    expanded: Boolean, onDismiss: () -> Unit, modifier: Modifier = Modifier, offset: DpOffset = DpOffset(0.dp, 4.dp),
+    /** false keeps focus (and the keyboard) on the text field underneath, e.g. the "/" command menu. */
+    focusable: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit,
+) {
     val c = Dsh.colors
     DropdownMenu(
         expanded, onDismiss, modifier.widthIn(min = 200.dp).padding(horizontal = 4.dp), offset = offset,
+        properties = androidx.compose.ui.window.PopupProperties(focusable = focusable),
         shape = Radius.lg, containerColor = if (c.isDark) Color(0xFF303136) else Color(0xFFF8F9FA),
         tonalElevation = 0.dp, shadowElevation = 8.dp,
         border = androidx.compose.foundation.BorderStroke(Hairline, c.borderL2), content = content,
@@ -411,13 +422,16 @@ fun DDialog(
 @Composable
 fun RiskConfirmDialog(title: String, body: String, check: String, confirm: String, cancel: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     var ok by remember { mutableStateOf(false) }
+    // Taps already in flight when the dialog pops up (e.g. a double tap on the menu) must not tick or confirm it.
+    val shownAt = remember { android.os.SystemClock.uptimeMillis() }
+    val settled = { android.os.SystemClock.uptimeMillis() - shownAt >= 500 }
     DDialog(onDismiss, title, buttons = {
         DButton(cancel, onDismiss, variant = BtnVariant.Outline)
-        DButton(confirm, onConfirm, enabled = ok)
+        DButton(confirm, { if (ok && settled()) onConfirm() }, enabled = ok)
     }) {
         Text(body, style = DshType.s14, color = Dsh.colors.labelSecondary)
-        Row(Modifier.clickable { ok = !ok }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            DCheckbox(ok, { ok = it })
+        Row(Modifier.toggleable(ok, role = Role.Checkbox) { if (settled()) ok = it }.heightIn(min = 40.dp).padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DCheckbox(ok, null)
             Text(check, style = DshType.s14, color = Dsh.colors.labelPrimary)
         }
     }
@@ -516,7 +530,8 @@ fun Chevron(modifier: Modifier = Modifier, open: Boolean = false, size: Dp = 14.
 @Composable
 fun DTopBar(title: String, onBack: (() -> Unit)?, modifier: Modifier = Modifier, actions: @Composable RowScope.() -> Unit = {}) {
     Row(modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (onBack != null) IconBtn(R.drawable.dsw_chevron_left_outline, onBack, size = 40.dp, iconSize = 18.dp, tint = Dsh.colors.labelPrimary)
+        if (onBack != null) IconBtn(R.drawable.dsw_chevron_left_outline, onBack, size = 40.dp, iconSize = 18.dp, tint = Dsh.colors.labelPrimary,
+            contentDescription = androidx.compose.ui.res.stringResource(R.string.back))
         else Spacer(Modifier.width(8.dp))
         Text(title, Modifier.weight(1f).padding(horizontal = 4.dp), style = DshType.base16m, color = Dsh.colors.labelPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         actions()

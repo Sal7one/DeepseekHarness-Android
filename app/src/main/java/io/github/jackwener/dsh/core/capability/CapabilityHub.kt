@@ -26,7 +26,18 @@ import io.github.jackwener.dsh.core.model.ToolGroup
 import io.github.jackwener.dsh.core.model.ruleIdOfSession
 import io.github.jackwener.dsh.core.platform.Notifications
 import io.github.jackwener.dsh.core.session.SessionStore
+import android.os.SystemClock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -73,18 +84,54 @@ class CapabilityHub @Inject constructor(
                 runCatching { bridge?.notify("capability/changed") }
             }
         }
-        // Shizuku-backed tool descriptions carry the live availability; re-list when it flips.
-        scope.launch {
-            shellGate.access.state.map { it::class }.distinctUntilChanged().drop(1).collect {
-                runCatching { bridge?.notify("capability/changed") }
-            }
-        }
     }
 
     fun descriptor(name: String): ToolDescriptor? = allTools[name]?.descriptor
 
+    /**
+     * The model-facing descriptor. Static on purpose: live state (Shizuku up/down, permissions) changes
+     * often, and every description change re-bills the whole cached prompt. Availability is reported in
+     * the call's result or error instead (path=…, shizuku_unavailable, permission_missing).
+     */
+    private val listedCache = java.util.concurrent.ConcurrentHashMap<String, ToolDescriptor>()
+    private fun listed(t: Tool): ToolDescriptor = listedCache.getOrPut(t.name) {
+        if (t.shell == ShellUse.None) t.descriptor
+        else t.descriptor.copy(description = t.descriptor.description + ShellGate.staticNote(t.shell, t.shellFallback))
+    }
+
     fun attach(peer: JsonRpcPeer) { bridge = peer }
-    fun detach() { bridge = null }
+
+    /** The bridge is gone (engine stopped, crashed or torn down): nothing can receive these results. */
+    fun detach() { bridge = null; cancelAll("engine stopped") }
+
+    /** In-flight bridge calls, keyed by [callKey]. Cancelling the job cancels every wait inside the call. */
+    private val inFlight = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private fun callKey(sessionId: String, callId: String) = "$sessionId\u0000$callId"
+
+    /** `capability/cancel { callId, sessionId? }`: the plugin timed out or the turn was aborted. */
+    fun cancel(callId: String, sessionId: String?, reason: String = "cancelled by the engine") {
+        val keys = if (sessionId != null) listOf(callKey(sessionId, callId)) else inFlight.keys.filter { it.endsWith("\u0000$callId") }
+        keys.forEach { k -> inFlight.remove(k)?.let { Log.i(TAG, "cancel $k: $reason"); it.cancel(CancellationException(reason)) } }
+    }
+
+    /** Cancels every in-flight call of a session tree (the user pressed stop, the session was closed). */
+    fun cancelSession(sessionId: String, reason: String = "session stopped") {
+        inFlight.keys.filter { it.substringBefore('\u0000').let { s -> s == sessionId || s.startsWith("$sessionId/") } }
+            .forEach { k -> inFlight.remove(k)?.cancel(CancellationException(reason)) }
+    }
+
+    /** Cancels every in-flight bridge call (engine loss / teardown). */
+    fun cancelAll(reason: String) {
+        inFlight.keys.toList().forEach { k -> inFlight.remove(k)?.cancel(CancellationException(reason)) }
+    }
+
+    /** Bridge notifications (EngineManager routes the capability channel's notifications here). */
+    fun onBridgeNotification(method: String, params: JsonObject) {
+        if (method == "capability/cancel") {
+            val callId = params["callId"]?.jsonPrimitive?.contentOrNull ?: return
+            cancel(callId, params["sessionId"]?.jsonPrimitive?.contentOrNull, params["reason"]?.jsonPrimitive?.contentOrNull ?: "cancelled by the engine")
+        }
+    }
 
     suspend fun onBridgeRequest(method: String, params: JsonObject): JsonElement = when (method) {
         "capability/list" -> {
@@ -92,18 +139,42 @@ class CapabilityHub @Inject constructor(
             buildJsonObject {
                 putJsonArray("tools") {
                     allTools.values.filter { ToolGroup.of(it.descriptor.group) in enabled }.forEach { t ->
-                        val d = if (t.shell == ShellUse.None) t.descriptor
-                            else t.descriptor.copy(description = t.descriptor.description + shellGate.describe(t.shell, t.shellFallback))
-                        add(RpcJson.encodeToJsonElement(ToolDescriptor.serializer(), d))
+                        add(RpcJson.encodeToJsonElement(ToolDescriptor.serializer(), listed(t)))
                     }
                 }
             }
         }
-        "capability/invoke" -> encode(invoke(params))
+        "capability/invoke" -> encode(invokeFromBridge(params))
+        // Also accepted as a request (fire-and-forget clients may prefer an ack).
+        "capability/cancel" -> { onBridgeNotification(method, params); buildJsonObject { put("ok", true) } }
         else -> throw JsonRpcException(-32601, "unknown method $method")
     }
 
-    /** Also used directly by rule "steps" actions (no engine involved). */
+    /** A bridge call runs in its own job so `capability/cancel`, stop and engine loss can cancel it. */
+    private suspend fun invokeFromBridge(params: JsonObject): ToolResult {
+        val sessionId = params["sessionId"]?.jsonPrimitive?.contentOrNull ?: ""
+        val callId = params["callId"]?.jsonPrimitive?.contentOrNull ?: java.util.UUID.randomUUID().toString()
+        val key = callKey(sessionId, callId)
+        // Own job (so capability/cancel can target this call), linked both ways to the engine request:
+        // the request's cancellation (EngineCalls: teardown / EOF) cancels it below, and it keeps the Call element.
+        val job = scope.async(currentCoroutineContext()[io.github.jackwener.dsh.core.engine.EngineCalls.Call] ?: kotlin.coroutines.EmptyCoroutineContext) { invoke(params) }
+        inFlight.put(key, job)?.cancel(CancellationException("superseded by a new call with the same id"))
+        return try {
+            job.await()
+        } catch (e: CancellationException) {
+            if (!currentCoroutineContext().isActive) { job.cancel(); throw e }
+            ToolResult.error("cancelled", "The call was cancelled (${e.message ?: "cancelled"}) before it acted; nothing was done.")
+        } finally {
+            inFlight.remove(key, job)
+        }
+    }
+
+    /**
+     * Executes one call. Also used directly by rule "steps" actions (no engine involved). Every wait
+     * for the user (unlock, permission card, Shizuku card, takeover) is bounded by the call's deadline
+     * (`timeoutMs` from the request, else the tool's descriptor) and is cancelled with the call; the
+     * tool itself only starts once those waits are over and the call is still live.
+     */
     suspend fun invoke(params: JsonObject): ToolResult {
         val name = params["tool"]?.jsonPrimitive?.contentOrNull ?: return ToolResult.error("invalid_args", "missing tool")
         val sessionId = params["sessionId"]?.jsonPrimitive?.contentOrNull ?: ""
@@ -115,23 +186,50 @@ class CapabilityHub @Inject constructor(
             "The '${tool.descriptor.group}' capability is turned off. Ask the user to enable it in DSH → Settings → Agent.")
         val ruleId = ruleIdOfSession(sessionId)
         if (ruleId != null) {
-            val spec = rules.get(ruleId)?.let { RpcJson.decodeFromString(RuleSpec.serializer(), it.specJson) }
+            val spec = rules.get(ruleId)?.let { e -> runCatching { RpcJson.decodeFromString(RuleSpec.serializer(), e.specJson) }.getOrNull() }
             if (spec == null || name !in spec.allowedTools) return ToolResult.error("not_authorized",
                 "tool_not_authorized: '$name' is not in this automation's approved tool list.")
         }
-        if (tool.needsUnlock && lock.isLocked) {
-            Notifications.post(context, Notifications.CHANNEL_ATTENTION, sessionId.hashCode() + 1,
-                context.getString(R.string.notif_unlock_title), context.getString(R.string.notif_unlock_text), sessionId.ifEmpty { null })
-            if (sessionId.isNotEmpty()) sessions.get().setWaitingForUnlock(sessionId, true)
-            val unlocked = lock.awaitUnlock(UNLOCK_WAIT_MS)
-            if (sessionId.isNotEmpty()) sessions.get().setWaitingForUnlock(sessionId, false)
-            if (!unlocked) return ToolResult.error("device_locked_timeout", "The phone stayed locked; this step needs an unlocked screen.")
+        val unattended = ruleId != null
+        val requested = params["timeoutMs"]?.jsonPrimitive?.longOrNull?.takeIf { it > 0 }
+        // Bridge calls carry the engine's timeout; rule steps (no engine) may wait longer for an unlock.
+        val budget = requested ?: if (sessionId.isEmpty() || unattended && tool.needsUnlock) UNATTENDED_UNLOCK_WAIT_MS else tool.descriptor.timeoutMs
+        // Answer a little before the engine gives up, so the model gets a clear result instead of a bare timeout.
+        val budgetMs = (budget - ANSWER_MARGIN_MS).coerceAtLeast(budget / 2)
+        val call = CallContext(sessionId, callId, unattended, SystemClock.elapsedRealtime() + budgetMs)
+        val result = withTimeoutOrNull(budgetMs) { run(tool, name, args, call) }
+        return result ?: call.waitingFor.let { waiting ->
+            if (waiting != null) ToolResult.error("waiting_for_user",
+                "Still waiting for the user to $waiting after ${budgetMs / 1000}s, so the call was cancelled and nothing was done. " +
+                    "Call the tool again when the user is ready, or tell them what is needed.")
+            else ToolResult.error("timeout", "The step did not finish within ${budgetMs / 1000}s and was cancelled. " +
+                "Check the current state (e.g. screen_read / device_status) before retrying.")
         }
-        val call = CallContext(sessionId, callId, unattended = ruleId != null)
+    }
+
+    private suspend fun run(tool: Tool, name: String, args: JsonObject, call: CallContext): ToolResult {
+        val sessionId = call.sessionId
+        if (tool.needsUnlock && lock.isLocked) {
+            val notifId = sessionId.hashCode() + 1
+            Notifications.post(context, Notifications.CHANNEL_ATTENTION, notifId,
+                context.getString(R.string.notif_unlock_title), context.getString(R.string.notif_unlock_text), sessionId.ifEmpty { null })
+            val unlocked = try {
+                if (sessionId.isNotEmpty()) sessions.get().setWaitingForUnlock(sessionId, true)
+                call.waitFor("unlock the phone") { lock.awaitUnlock(call.deadlineMs - SystemClock.elapsedRealtime()) }
+            } finally {
+                withContext(NonCancellable) {
+                    runCatching { androidx.core.app.NotificationManagerCompat.from(context).cancel(notifId) }
+                    if (sessionId.isNotEmpty()) runCatching { sessions.get().setWaitingForUnlock(sessionId, false) }
+                }
+            }
+            if (!unlocked) return ToolResult.error("device_locked_timeout", "The phone stayed locked; this step needs an unlocked screen. Nothing was done.")
+        }
         return try {
             var attempt = 0
             var result: ToolResult? = null
             while (result == null) {
+                // Re-check right before acting: a call cancelled while it waited must never run late.
+                io.github.jackwener.dsh.core.engine.EngineCalls.ensureCallActive()
                 try {
                     result = tool.invoke(args, call)
                 } catch (e: io.github.jackwener.dsh.core.platform.ShellUnavailableException) {
@@ -141,11 +239,17 @@ class CapabilityHub @Inject constructor(
                 } catch (e: PermissionMissingException) {
                     // Attended sessions get a just-in-time permission card in the composer slot; the call
                     // waits there and is retried once the user comes back from the system settings page.
-                    if (call.unattended || sessionId.isEmpty() || attempt++ >= 3 || !sessions.get().requestPermission(sessionId, name, e.what))
+                    if (call.unattended || sessionId.isEmpty()) return ToolResult.error("permission_missing",
+                        "Missing permission: ${e.what}. Automations cannot ask the user for it; skip this step and report that DSH needs '${e.what}' (DSH → Settings → Permissions).")
+                    if (attempt++ >= 3 || !call.waitFor("grant '${e.what}'") { sessions.get().requestPermission(sessionId, name, e.what) })
                         return ToolResult.error("permission_missing", "Missing permission: ${e.what}. The user declined to grant it; continue without this capability or explain what is needed.")
                 }
             }
-            result.also { r -> ShotStore.save(context, sessionId, callId, r.content.filterIsInstance<Content.Image>()) }
+            result.also { r -> ShotStore.save(context, sessionId, call.callId, r.content.filterIsInstance<Content.Image>()) }
+        } catch (e: CancellationException) {
+            // Our own cancellation (cancel / stop / deadline) propagates; a timeout inside the tool is a failure.
+            currentCoroutineContext().ensureActive()
+            ToolResult.error("failed", "The step timed out internally (${e.message}); check the current state before retrying.")
         } catch (e: InvalidArgsException) {
             ToolResult.error("invalid_args", e.message ?: "invalid arguments")
         } catch (e: Exception) {
@@ -169,7 +273,9 @@ class CapabilityHub @Inject constructor(
 
     private companion object {
         const val TAG = "CapabilityHub"
-        const val UNLOCK_WAIT_MS = 6 * 60 * 60_000L
+        /** Fixed-step automations (no engine): how long a needsUnlock step waits for the user to unlock. */
+        const val UNATTENDED_UNLOCK_WAIT_MS = 2 * 60 * 60_000L
+        const val ANSWER_MARGIN_MS = 5_000L
     }
 }
 

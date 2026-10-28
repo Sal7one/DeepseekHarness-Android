@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -92,33 +94,45 @@ private fun openKeyPage(context: android.content.Context) {
 @Composable
 fun isZh(): Boolean = LocalConfiguration.current.locales[0].language == "zh"
 
-enum class SettingsSection(val label: Int) {
-    Account(R.string.acct_nav), General(R.string.set_general), Model(R.string.set_model), Agent(R.string.set_agent), WebSearch(R.string.set_web),
-    Usage(R.string.set_usage), Phone(R.string.set_phone), About(R.string.set_about);
-    companion object { fun of(name: String?) = entries.firstOrNull { it.name.equals(name, true) } ?: entries.first() }
+enum class SettingsSection(val label: Int, val icon: Int) {
+    Account(R.string.acct_nav, R.drawable.dsw_user_outline), General(R.string.set_general, R.drawable.dsw_settings_outline),
+    Model(R.string.set_model, R.drawable.dsw_data_outline), Agent(R.string.set_agent, R.drawable.dsw_apps_add_outline),
+    Usage(R.string.set_usage, R.drawable.dsw_gauge_outline), Phone(R.string.set_phone, R.drawable.dsw_shield_outline),
+    About(R.string.set_about, R.drawable.dsw_info_outline);
+    companion object {
+        /** null (blank / unknown) = the section index. 网页搜索 was folded into 能力. */
+        fun of(name: String?): SettingsSection? =
+            if (name.equals("WebSearch", true)) Agent else entries.firstOrNull { it.name.equals(name, true) }
+    }
 }
 
-/** dsh settings at ≤767 px: full-screen sheet, horizontal section strip under the title, stacked rows. */
+/**
+ * dsh settings on a phone: a section index (one card of rows with chevrons) that pushes each
+ * section as its own page. A deep link (error row 打开自检, drawer 权限与无障碍 …) opens the page
+ * directly and Back returns to where it came from.
+ */
 @Composable
-fun SettingsScreen(initial: SettingsSection, onBack: () -> Unit, onNotificationApps: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
+fun SettingsScreen(initial: SettingsSection?, onBack: () -> Unit, onNotificationApps: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
     val c = Dsh.colors
     var section by rememberSaveable { mutableStateOf(initial) }
+    val deepLinked = rememberSaveable { initial != null }
+    val toIndex = section != null && !deepLinked
+    BackHandler(toIndex) { section = null }
     Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
-        DTopBar(stringResource(R.string.settings), onBack)
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            SettingsSection.entries.forEach { s -> FilterPill(stringResource(s.label), s == section) { section = s } }
-        }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).navigationBarsPadding().padding(bottom = 24.dp)) {
+        DTopBar(section?.let { stringResource(it.label) } ?: stringResource(R.string.settings), { if (toIndex) section = null else onBack() })
+        // One scroll position per page; IME insets first so focused fields and their buttons stay above the keyboard.
+        val scroll = rememberSaveable(section, saver = androidx.compose.foundation.ScrollState.Saver) { androidx.compose.foundation.ScrollState(0) }
+        Column(Modifier.fillMaxSize().imePadding().verticalScroll(scroll).navigationBarsPadding().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
             when (section) {
+                null -> SettingsIndex { section = it }
                 SettingsSection.Account -> {
                     val hasKey by vm.hasKeyFlow.collectAsStateWithLifecycle()
-                    SettingsGroupTitle(stringResource(R.string.acct_nav))
+                    Spacer(Modifier.height(8.dp))
                     io.github.jackwener.dsh.feature.account.AccountSettingsSection(vm.account, usingApiKey = hasKey)
                 }
                 SettingsSection.General -> GeneralSection(vm)
                 SettingsSection.Model -> ModelSection(vm)
                 SettingsSection.Agent -> AgentSection(vm)
-                SettingsSection.WebSearch -> WebSection()
                 SettingsSection.Usage -> UsageSection(vm)
                 SettingsSection.Phone -> PhoneSection(vm, onNotificationApps)
                 SettingsSection.About -> AboutSection(vm)
@@ -128,10 +142,47 @@ fun SettingsScreen(initial: SettingsSection, onBack: () -> Unit, onNotificationA
 }
 
 @Composable
+private fun SettingsIndex(onOpen: (SettingsSection) -> Unit) {
+    val c = Dsh.colors
+    Spacer(Modifier.height(8.dp))
+    SettingsCard {
+        SettingsSection.entries.forEachIndexed { i, s ->
+            SettingsRow(stringResource(s.label), divider = i > 0, onClick = { onOpen(s) },
+                leading = { DIcon(s.icon, size = 18.dp, tint = c.labelSecondary) },
+                trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = c.labelTertiary) })
+        }
+    }
+}
+
+/** Re-evaluates on every ON_RESUME (coming back from a system settings page). */
+@Composable
+private fun resumeTick(): Int {
+    val owner = LocalLifecycleOwner.current
+    var tick by remember { mutableStateOf(0) }
+    DisposableEffect(owner) {
+        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) tick++ }
+        owner.lifecycle.addObserver(obs); onDispose { owner.lifecycle.removeObserver(obs) }
+    }
+    return tick
+}
+
+@Composable
 private fun GeneralSection(vm: SettingsViewModel) {
     val s by vm.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    SettingsGroupTitle(stringResource(R.string.set_general))
+    val tick = resumeTick()
+    val canOverlay = remember(tick) { Settings.canDrawOverlays(context) }
+    val isAssistant = remember(tick) { vm.isDefaultAssistant() }
+    // The floating ball needs "display over other apps" first; it is only switched on once granted.
+    var wantBall by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(canOverlay) { if (wantBall && canOverlay) { wantBall = false; vm.setBall(true) } }
+    val openOverlay = {
+        wantBall = true
+        runCatching { context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}"))) }
+            .onFailure { runCatching { context.startActivity(PermissionCatalog.appDetails(context)) } }
+        Unit
+    }
+    Spacer(Modifier.height(8.dp))
     SettingsCard {
         SettingsRow(stringResource(R.string.set_permission), stringResource(R.string.set_permission_desc), divider = false, stacked = true) {
             Segmented(PermissionPreset.entries.map { stringResource(PresetUi.label(it)) }, s.defaultPreset.ordinal, { vm.setDefaultPreset(PermissionPreset.entries[it]) })
@@ -144,7 +195,7 @@ private fun GeneralSection(vm: SettingsViewModel) {
         SettingsRow(stringResource(R.string.set_language), stringResource(R.string.set_language_desc), onClick = {
             val i = if (Build.VERSION.SDK_INT >= 33) Intent(Settings.ACTION_APP_LOCALE_SETTINGS, Uri.parse("package:${context.packageName}"))
             else PermissionCatalog.appDetails(context)
-            context.startActivity(i)
+            runCatching { context.startActivity(i) }.onFailure { runCatching { context.startActivity(PermissionCatalog.appDetails(context)) } }
         }, trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = Dsh.colors.labelTertiary) })
         SettingsRow(stringResource(R.string.set_work_details), stringResource(R.string.set_work_details_desc), stacked = true) {
             Segmented(listOf(stringResource(R.string.details_compact), stringResource(R.string.details_standard), stringResource(R.string.details_detailed)),
@@ -156,9 +207,17 @@ private fun GeneralSection(vm: SettingsViewModel) {
     }
     SettingsGroupTitle(stringResource(R.string.set_entry_points))
     SettingsCard {
-        SettingsRow(stringResource(R.string.floating_ball), stringResource(R.string.floating_ball_desc), divider = false, trailing = { DSwitch(s.floatingBall, { vm.setBall(it) }) })
-        SettingsRow(stringResource(R.string.default_assistant), stringResource(R.string.default_assistant_desc), onClick = { context.startActivity(vm.assistantSettingsIntent()) },
-            trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = Dsh.colors.labelTertiary) })
+        val ballBlocked = (s.floatingBall || wantBall) && !canOverlay
+        SettingsRow(stringResource(R.string.floating_ball), stringResource(if (ballBlocked) R.string.overlay_needed else R.string.floating_ball_desc), divider = false,
+            onClick = if (ballBlocked) openOverlay else null,
+            trailing = { DSwitch(s.floatingBall && canOverlay, { on -> if (on && !canOverlay) openOverlay() else { wantBall = false; vm.setBall(on) } }) })
+        SettingsRow(stringResource(R.string.default_assistant), stringResource(R.string.default_assistant_desc), onClick = { vm.openAssistantSettings(context) },
+            trailing = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (isAssistant) Tag(stringResource(R.string.assistant_is_default), Tone.Success)
+                    DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = Dsh.colors.labelTertiary)
+                }
+            })
         SettingsRow(stringResource(R.string.allow_external_apps), stringResource(R.string.allow_external_apps_desc),
             trailing = { DSwitch(s.allowExternalApps, { vm.setAllowExternalApps(it) }) })
     }
@@ -173,7 +232,8 @@ private fun ModelSection(vm: SettingsViewModel) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
-    SettingsGroupTitle(stringResource(R.string.set_model))
+    val masked = remember(hasKey) { vm.maskedKey }
+    Spacer(Modifier.height(8.dp))
     // dsh provider card: grey fill, API key field, Cancel / Apply.
     Column(Modifier.fillMaxWidth().clip(Radius.lg).background(c.bgModule).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -182,8 +242,8 @@ private fun ModelSection(vm: SettingsViewModel) {
             Text("DeepSeek", Modifier.weight(1f), style = DshType.s14m, color = c.labelPrimary)
             Tag(stringResource(if (hasKey) R.string.key_connected else R.string.key_missing), if (hasKey) Tone.Success else Tone.Warn)
         }
-        Text("API key", style = DshType.xs13m, color = c.labelSecondary)
-        DInput(key, { key = it }, placeholder = vm.maskedKey ?: "sk-…", secret = true, keyboardType = KeyboardType.Password)
+        Text(stringResource(R.string.api_key_label), style = DshType.xs13m, color = c.labelSecondary)
+        DInput(key, { key = it }, placeholder = masked ?: "sk-…", secret = true, keyboardType = KeyboardType.Password)
         when (status) {
             null -> {}
             "checking" -> Text(stringResource(R.string.key_checking), style = DshType.xxs12, color = c.labelTertiary)
@@ -193,7 +253,7 @@ private fun ModelSection(vm: SettingsViewModel) {
             Text(stringResource(R.string.key_get), Modifier.weight(1f).clip(Radius.sm).clickable { openKeyPage(context) }.padding(vertical = 4.dp),
                 style = DshType.xs13, color = c.link)
             if (hasKey) DButton(stringResource(R.string.key_clear), { vm.clearKey() }, variant = BtnVariant.Outline, size = BtnSize.Sm)
-            DButton(stringResource(R.string.cancel), { key = "" }, variant = BtnVariant.Outline, size = BtnSize.Sm)
+            if (key.isNotEmpty()) DButton(stringResource(R.string.cancel), { key = "" }, variant = BtnVariant.Outline, size = BtnSize.Sm)
             DButton(stringResource(R.string.apply), { scope.launch { if (vm.saveKey(key) == null) key = "" } }, size = BtnSize.Sm, enabled = key.isNotBlank())
         }
     }
@@ -213,6 +273,7 @@ private fun ModelSection(vm: SettingsViewModel) {
 private fun AgentSection(vm: SettingsViewModel) {
     val c = Dsh.colors
     val s by vm.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     SettingsGroupTitle(stringResource(R.string.set_capabilities))
     Text(stringResource(R.string.set_capabilities_desc), Modifier.padding(start = 4.dp, bottom = 8.dp), style = DshType.xs13, color = c.labelTertiary)
     SettingsCard {
@@ -232,9 +293,13 @@ private fun AgentSection(vm: SettingsViewModel) {
             DInput(daily, { daily = it.filter(Char::isDigit) }, placeholder = "0", keyboardType = KeyboardType.Number)
         }
         Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.CenterEnd) {
-            DButton(stringResource(R.string.save), { vm.setLimits(daily.toLongOrNull() ?: 0, session.toLongOrNull() ?: 0) }, size = BtnSize.Sm)
+            DButton(stringResource(R.string.save), {
+                vm.setLimits(daily.toLongOrNull() ?: 0, session.toLongOrNull() ?: 0)
+                android.widget.Toast.makeText(context, R.string.saved, android.widget.Toast.LENGTH_SHORT).show()
+            }, size = BtnSize.Sm)
         }
     }
+    WebSection()
 }
 
 private fun groupLabel(g: ToolGroup) = when (g) {
@@ -253,7 +318,7 @@ private fun groupLabel(g: ToolGroup) = when (g) {
 
 @Composable
 private fun WebSection() {
-    SettingsGroupTitle(stringResource(R.string.set_web))
+    SettingsGroupTitle(stringResource(R.string.set_web_group))
     SettingsCard {
         SettingsRow(stringResource(R.string.web_search_title), stringResource(R.string.web_search_desc), divider = false, trailing = { Tag(stringResource(R.string.enabled), Tone.Success) })
         SettingsRow(stringResource(R.string.web_fetch_title), stringResource(R.string.web_fetch_desc), trailing = { Tag(stringResource(R.string.enabled), Tone.Success) })
@@ -281,7 +346,8 @@ private fun UsageSection(vm: SettingsViewModel) {
         if (usage.isEmpty()) SettingsRow(stringResource(R.string.usage_none), divider = false)
         usage.forEachIndexed { i, u ->
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                Row { Text(u.day, Modifier.weight(1f), style = DshType.xs13, color = c.labelSecondary)
+                val day = remember(u.day) { runCatching { java.time.LocalDate.parse(u.day) }.getOrNull() }
+                Row { Text(day?.let { stringResource(R.string.date_md, it.monthValue, it.dayOfMonth) } ?: u.day, Modifier.weight(1f), style = DshType.xs13, color = c.labelSecondary)
                     Text("${Fmt.tokens(u.inputTokens + u.outputTokens)} tok", style = DshType.mono12, color = c.labelTertiary) }
                 Box(Modifier.padding(top = 4.dp).fillMaxWidth().height(4.dp).clip(CircleShape).background(c.borderL2)) {
                     Box(Modifier.fillMaxWidth((u.inputTokens + u.outputTokens).toFloat() / max).height(4.dp).clip(CircleShape).background(c.kindMessages))
@@ -304,15 +370,17 @@ private fun PhoneSection(vm: SettingsViewModel, onNotificationApps: () -> Unit) 
     val c = Dsh.colors
     val context = LocalContext.current
     val zh = isZh()
-    val owner = LocalLifecycleOwner.current
-    var tick by remember { mutableStateOf(0) }
-    DisposableEffect(owner) {
-        val obs = LifecycleEventObserver { _, e -> if (e == Lifecycle.Event.ON_RESUME) tick++ }
-        owner.lifecycle.addObserver(obs); onDispose { owner.lifecycle.removeObserver(obs) }
+    var bump by remember { mutableStateOf(0) }
+    val tick = resumeTick() + bump
+    // Runtime permissions denied with "don't ask again": 去授权 opens the app's settings page instead.
+    var requested by remember { mutableStateOf<String?>(null) }
+    var blocked by rememberSaveable { mutableStateOf(setOf<String>()) }
+    val runtime = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
+        bump++
+        val id = requested
+        if (id != null && res.values.none { it } && PermissionCatalog.permanentlyDenied(context, res.keys)) blocked = blocked + id
     }
-    val runtime = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { tick++ }
-    SettingsGroupTitle(stringResource(R.string.set_phone))
-    Text(stringResource(R.string.set_phone_desc), Modifier.padding(start = 4.dp, bottom = 8.dp), style = DshType.xs13, color = c.labelTertiary)
+    Text(stringResource(R.string.set_phone_desc), Modifier.padding(start = 4.dp, top = 12.dp, bottom = 8.dp), style = DshType.xs13, color = c.labelTertiary)
     SettingsCard {
         PermissionCatalog.all.forEachIndexed { i, p ->
             val granted = remember(tick) { p.check(context) }
@@ -320,15 +388,16 @@ private fun PhoneSection(vm: SettingsViewModel, onNotificationApps: () -> Unit) 
                 leading = { StateDot(if (granted) DotKind.Done else DotKind.Idle) },
                 trailing = {
                     if (granted) Text(stringResource(R.string.granted), style = DshType.xs13, color = c.labelTertiary)
-                    else DButton(stringResource(R.string.go_grant), {
+                    else DButton(stringResource(if (p.id in blocked) R.string.open_system_settings else R.string.go_grant), {
                         val rt = p.runtime
-                        if (rt != null) runtime.launch(rt.toTypedArray())
+                        if (rt != null && p.id !in blocked) { requested = p.id; runtime.launch(rt.toTypedArray()) }
+                        else if (rt != null) runCatching { context.startActivity(PermissionCatalog.appDetails(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                         else runCatching { context.startActivity((p.intent(context) ?: PermissionCatalog.appDetails(context)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                     }, variant = BtnVariant.Outline, size = BtnSize.Sm)
                 })
         }
     }
-    Text(stringResource(R.string.restricted_hint), Modifier.padding(start = 4.dp, top = 8.dp), style = DshType.xxs12, color = c.labelCaption)
+    Text(stringResource(R.string.restricted_hint), Modifier.padding(start = 4.dp, top = 8.dp), style = DshType.xxs12, color = c.labelTertiary)
     SettingsGroupTitle(stringResource(R.string.set_more))
     SettingsCard {
         SettingsRow(stringResource(R.string.notification_apps), stringResource(R.string.notification_apps_desc), divider = false, onClick = onNotificationApps,
@@ -347,7 +416,7 @@ private fun AboutSection(vm: SettingsViewModel) {
     val checks by vm.doctor.collectAsStateWithLifecycle()
     val engine by vm.engineState.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.runDoctor() }
-    SettingsGroupTitle(stringResource(R.string.set_about))
+    Spacer(Modifier.height(8.dp))
     SettingsCard {
         SettingsRow("DSH", stringResource(R.string.version, BuildConfig.VERSION_NAME), divider = false,
             leading = { io.github.jackwener.dsh.core.designsystem.Whale(width = 22.dp) })
@@ -356,7 +425,7 @@ private fun AboutSection(vm: SettingsViewModel) {
             EngineState.Stopped -> stringResource(R.string.engine_idle); is EngineState.Failed -> e.message.take(300)
         }, leading = { StateDot(when (engine) { EngineState.Ready -> DotKind.Done; is EngineState.Failed -> DotKind.Error; else -> DotKind.Idle }) },
             trailing = { DButton(stringResource(R.string.restart_engine), { vm.restartEngine(); vm.runDoctor() }, variant = BtnVariant.Outline, size = BtnSize.Sm) })
-        SettingsRow(stringResource(R.string.about_disclaimer), divider = true)
+        SettingsRow(stringResource(R.string.about_disclaimer_title), stringResource(R.string.about_disclaimer), divider = true)
     }
     SettingsGroupTitle(stringResource(R.string.doctor))
     SettingsCard {
@@ -384,11 +453,14 @@ private fun AboutSection(vm: SettingsViewModel) {
 fun NotificationAppsScreen(onBack: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
     val c = Dsh.colors
     val s by vm.settings.collectAsStateWithLifecycle()
-    val apps = remember { vm.installedApps() }
+    val loaded by vm.installedApps.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.loadInstalledApps() }
+    val apps = loaded.orEmpty()
     var q by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
+    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().imePadding()) {
         DTopBar(stringResource(R.string.notification_apps), onBack)
         Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) { DInput(q, { q = it }, placeholder = stringResource(R.string.search)) }
+        if (loaded == null) Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { io.github.jackwener.dsh.core.designsystem.Spinner(20.dp) }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp).navigationBarsPadding()) {
             items(apps.filter { q.isBlank() || it.first.contains(q, true) || it.second.contains(q, true) }, key = { it.second }) { (label, pkg) ->
                 SettingsRow(label, pkg, trailing = { DSwitch(pkg in s.notificationApps, { vm.toggleNotificationApp(pkg) }) })
@@ -412,7 +484,7 @@ fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Uni
     val context = LocalContext.current
     var key by remember { mutableStateOf("") }
     LaunchedEffect(accountState.signedIn) { if (accountState.signedIn) onDone() }
-    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).padding(24.dp),
+    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().navigationBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(48.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -448,7 +520,7 @@ fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Uni
             }
         }
         Spacer(Modifier.height(16.dp))
-        Text(stringResource(R.string.onb_disclaimer), style = DshType.xxs12, color = c.labelCaption, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+        Text(stringResource(R.string.onb_disclaimer), style = DshType.xxs12, color = c.labelTertiary, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
 

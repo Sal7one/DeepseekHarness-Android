@@ -335,7 +335,7 @@ private fun Card(content: @Composable () -> Unit) {
 
 /**
  * dsh sidebar account launcher: signed in → 24 dp avatar + name (menu: 设置, 退出登录); signed out →
- * a 32 dp 更多 row with the ellipsis glyph (menu: 设置, 登录).
+ * a plain 设置 row with a 登录 button beside it (spec §3.7: no account → just 设置).
  */
 @Composable
 fun DrawerAccountRow(account: AccountRepository, onSettings: () -> Unit) {
@@ -344,18 +344,27 @@ fun DrawerAccountRow(account: AccountRepository, onSettings: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val (requestSignOut, signOutDialog) = rememberSignOut(account)
     val profile = s.displayProfile
-    val label = if (s.signedIn) profile?.name ?: profile?.contact ?: stringResource(R.string.acct_signed_in) else stringResource(R.string.acct_more)
+    if (!s.signedIn) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).heightIn(min = 44.dp).pressable(onSettings, Radius.md).padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DIcon(R.drawable.dsw_settings_outline, size = 16.dp, tint = c.labelSecondary)
+                Text(stringResource(R.string.settings), style = DshType.s14, color = c.labelPrimary)
+            }
+            DButton(stringResource(R.string.acct_sign_in), { account.startSignIn() }, variant = BtnVariant.Outline, size = BtnSize.Sm, icon = R.drawable.dsw_user_outline)
+        }
+        return
+    }
+    val label = profile?.name ?: profile?.contact ?: stringResource(R.string.acct_signed_in)
     Box {
-        Row(Modifier.fillMaxWidth().height(if (s.signedIn) 44.dp else 36.dp).pressable({ menu = true }, Radius.md).padding(horizontal = 6.dp),
+        Row(Modifier.fillMaxWidth().height(44.dp).pressable({ menu = true }, Radius.md).padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (s.signedIn) AccountAvatar(account, 24.dp)
-            else Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { DIcon(R.drawable.dsw_ellipsis_outline, size = 14.dp, tint = c.labelPrimary) }
+            AccountAvatar(account, 24.dp)
             Text(label, Modifier.weight(1f), style = DshType.s14, color = c.labelPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         DMenu(menu, { menu = false }) {
             MenuItem(stringResource(R.string.settings), { menu = false; onSettings() }, R.drawable.dsw_settings_outline)
-            if (s.signedIn) MenuItem(stringResource(R.string.acct_sign_out), { menu = false; requestSignOut() }, R.drawable.dsw_logout_outline)
-            else MenuItem(stringResource(R.string.acct_sign_in), { menu = false; account.startSignIn() }, R.drawable.dsw_user_outline)
+            MenuItem(stringResource(R.string.acct_sign_out), { menu = false; requestSignOut() }, R.drawable.dsw_logout_outline)
         }
     }
     signOutDialog()

@@ -43,6 +43,8 @@ class SettingsViewModel @Inject constructor(
     private val repo: SettingsRepository,
     private val secrets: SecretStore,
     private val engine: EngineManager,
+    /** Engine restarts go through the store, so the runs they kill end as stopped (not spinning forever). */
+    private val sessions: io.github.jackwener.dsh.core.session.SessionStore,
     val shizuku: ShizukuShell,
     val account: io.github.jackwener.dsh.core.account.AccountRepository,
     usage: UsageDao,
@@ -55,7 +57,7 @@ class SettingsViewModel @Inject constructor(
 
     val hasKey get() = secrets.read() != null
     val hasKeyFlow = MutableStateFlow(secrets.read() != null)
-    fun clearKey() = viewModelScope.launch { secrets.clear(); hasKeyFlow.value = false; engine.stop() }
+    fun clearKey() = viewModelScope.launch { secrets.clear(); hasKeyFlow.value = false; sessions.restartEngine() }
     val maskedKey get() = secrets.read()?.let { it.take(5) + "…" + it.takeLast(4) }
 
     fun setGroup(g: ToolGroup, on: Boolean) = viewModelScope.launch { repo.setGroupEnabled(g, on) }
@@ -66,7 +68,7 @@ class SettingsViewModel @Inject constructor(
     fun setBusySend(b: BusySend) = viewModelScope.launch { repo.setBusySend(b) }
     fun setDefaultPreset(p: PermissionPreset) = viewModelScope.launch { repo.setDefaultPreset(p) }
     fun setAllowExternalApps(on: Boolean) = viewModelScope.launch { repo.setAllowExternalApps(on) }
-    fun restartEngine() = viewModelScope.launch { engine.stop() }
+    fun restartEngine() = viewModelScope.launch { sessions.restartEngine() }
     val engineLog: String? get() = io.github.jackwener.dsh.core.engine.EngineDiagnostics.logTail(context, 4000)
     val lastEngineExit: String? get() = ReliabilityDoctor.lastExitText(context)
     /** Bumped on resume so permission rows re-check their status. */
@@ -83,14 +85,21 @@ class SettingsViewModel @Inject constructor(
         keyStatus.value = "checking"
         val err = validateKey(key.trim())
         keyStatus.value = err
-        if (err == null) { secrets.write(key.trim()); hasKeyFlow.value = true; engine.stop() }
+        if (err == null) { secrets.write(key.trim()); hasKeyFlow.value = true; sessions.restartEngine() }
         return err
     }
 
-    fun installedApps(): List<Pair<String, String>> = context.packageManager.getInstalledApplications(0)
-        .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || it.packageName.contains("messaging") || it.packageName.contains("mms") }
-        .map { context.packageManager.getApplicationLabel(it).toString() to it.packageName }
-        .sortedBy { it.first.lowercase() }
+    /** (label, package) of user apps for the notification whitelist; null while loading. */
+    val installedApps = MutableStateFlow<List<Pair<String, String>>?>(null)
+    fun loadInstalledApps() = viewModelScope.launch {
+        if (installedApps.value != null) return@launch
+        installedApps.value = withContext(Dispatchers.IO) {
+            context.packageManager.getInstalledApplications(0)
+                .filter { (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 || it.packageName.contains("messaging") || it.packageName.contains("mms") }
+                .map { context.packageManager.getApplicationLabel(it).toString() to it.packageName }
+                .sortedBy { it.first.lowercase() }
+        }
+    }
 
     fun runDoctor() = viewModelScope.launch {
         val zh = context.resources.configuration.locales[0].language == "zh"
@@ -105,7 +114,7 @@ class SettingsViewModel @Inject constructor(
             shellStateLabel(context, shell), shellFixIntent(shizuku.access, shell))
         val signedIn = account.signedIn
         checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn, when {
-            hasKey -> "API key " + (maskedKey ?: "")
+            hasKey -> "API Key " + (maskedKey ?: "")
             signedIn -> if (zh) "DeepSeek 账号" else "DeepSeek account"
             else -> if (zh) "未登录，也未设置 API Key" else "Not signed in, no API key"
         })
@@ -132,5 +141,15 @@ class SettingsViewModel @Inject constructor(
         }.getOrElse { it.message ?: "network error" }
     }
 
-    fun assistantSettingsIntent() = Intent(Settings.ACTION_VOICE_INPUT_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /** DSH holds the assistant role (默认数字助理). */
+    fun isDefaultAssistant(): Boolean = runCatching {
+        context.getSystemService(android.app.role.RoleManager::class.java).isRoleHeld(android.app.role.RoleManager.ROLE_ASSISTANT)
+    }.getOrDefault(false)
+
+    /** The default-apps page (where the assistant picker lives on most ROMs), then voice input, then Settings. */
+    fun openAssistantSettings(from: Context) {
+        listOf(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS, Settings.ACTION_VOICE_INPUT_SETTINGS, Settings.ACTION_SETTINGS).firstOrNull { action ->
+            runCatching { from.startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }.isSuccess
+        }
+    }
 }

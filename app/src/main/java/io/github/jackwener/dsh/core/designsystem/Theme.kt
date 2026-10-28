@@ -11,6 +11,9 @@ import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
@@ -88,6 +91,13 @@ fun DshTheme(mode: ThemeMode = ThemeMode.System, content: @Composable () -> Unit
     val colors = if (dark) DarkDsh else LightDsh
     val context = LocalContext.current
     val reduced = remember { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }
+    // System-bar icons follow the in-app theme, not the system night mode (enableEdgeToEdge's default).
+    val view = LocalView.current
+    if (!view.isInEditMode) SideEffect {
+        context.findActivity()?.window?.let { w ->
+            WindowCompat.getInsetsController(w, view).apply { isAppearanceLightStatusBars = !dark; isAppearanceLightNavigationBars = !dark }
+        }
+    }
     CompositionLocalProvider(
         LocalDshColors provides colors,
         LocalReducedMotion provides reduced,
@@ -100,4 +110,10 @@ fun DshTheme(mode: ThemeMode = ThemeMode.System, content: @Composable () -> Unit
 object Dsh {
     val colors: DshColors
         @Composable @ReadOnlyComposable get() = LocalDshColors.current
+}
+
+fun android.content.Context.findActivity(): android.app.Activity? {
+    var c: android.content.Context? = this
+    while (c is android.content.ContextWrapper) { if (c is android.app.Activity) return c; c = c.baseContext }
+    return null
 }

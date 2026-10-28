@@ -14,6 +14,7 @@ import io.github.jackwener.dsh.core.capability.InvalidArgsException
 import io.github.jackwener.dsh.core.capability.Tool
 import io.github.jackwener.dsh.core.capability.ToolResult
 import io.github.jackwener.dsh.core.capability.ToolSet
+import io.github.jackwener.dsh.core.capability.bool
 import io.github.jackwener.dsh.core.capability.int
 import io.github.jackwener.dsh.core.capability.reqStr
 import io.github.jackwener.dsh.core.capability.str
@@ -34,7 +35,14 @@ import javax.inject.Singleton
 @Singleton
 class BrowserTools @Inject constructor(@ApplicationContext private val context: Context) : ToolSet {
     private var web: WebView? = null
-    private var pageLoaded = CompletableDeferred<Unit>()
+
+    /**
+     * One navigation the tool is waiting for. onPageFinished only completes it after a page *started*
+     * since the wait began, so a late finish from an earlier page, frame or redirect cannot end it early.
+     */
+    private class Nav { val done = CompletableDeferred<Unit>(); @Volatile var started = false }
+    @Volatile private var nav = Nav()
+    private fun newNav(): Nav = Nav().also { nav = it }
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun view(): WebView = withContext(Dispatchers.Main) {
@@ -43,7 +51,8 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
             settings.domStorageEnabled = true
             settings.userAgentString = settings.userAgentString.replace("; wv", "")
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView?, url: String?) { pageLoaded.complete(Unit) }
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) { nav.started = true }
+                override fun onPageFinished(view: WebView?, url: String?) { nav.let { if (it.started) it.done.complete(Unit) } }
             }
             val m = context.resources.displayMetrics
             measure(View.MeasureSpec.makeMeasureSpec(m.widthPixels, View.MeasureSpec.EXACTLY),
@@ -58,9 +67,11 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
         d.await()
     }.let { raw -> runCatching { (Json.parseToJsonElement(raw) as? JsonPrimitive)?.content }.getOrNull() ?: raw }
 
-    private suspend fun awaitLoad() {
-        withTimeoutOrNull(20_000) { pageLoaded.await() }
+    /** True when the page finished loading within the timeout. */
+    private suspend fun awaitLoad(n: Nav, timeoutMs: Long = 20_000): Boolean {
+        val ok = withTimeoutOrNull(timeoutMs) { n.done.await() } != null
         delay(600)
+        return ok
     }
 
     /** Page text plus numbered interactive elements (data-dsh-id). */
@@ -74,10 +85,10 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 var url = args.reqStr("url")
                 if (!url.contains("://")) url = "https://$url"
-                pageLoaded = CompletableDeferred()
+                val n = newNav()
                 withContext(Dispatchers.Main) { view().loadUrl(url) }
-                awaitLoad()
-                return ToolResult.text(read())
+                val loaded = awaitLoad(n)
+                return ToolResult.text((if (loaded) "" else "(the page was still loading after 20s; content may be partial)\n") + read())
             }
         },
         object : Tool("browser_read", ToolGroup.Browser, Risk.read, false, "Re-read the current page (text + interactive elements).", {
@@ -90,29 +101,34 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val id = args.int("id") ?: throw InvalidArgsException("id")
-                pageLoaded = CompletableDeferred()
+                val n = newNav()
                 val r = js("(()=>{const e=document.querySelector('[data-dsh-id=\"$id\"]');if(!e)return 'missing';e.scrollIntoView({block:'center'});e.click();return 'ok'})()")
                 if (r == "missing") throw InvalidArgsException("No element $id; call browser_read")
-                withTimeoutOrNull(4_000) { pageLoaded.await() }
+                withTimeoutOrNull(4_000) { n.done.await() }
                 delay(800)
                 return ToolResult.text("Clicked $id.\n" + read())
             }
         },
         object : Tool("browser_type", ToolGroup.Browser, Risk.write, false, "Type into an input by [id]; submit=true presses Enter / submits the form.", {
             int("id", "Element id", required = true); string("text", "Text", required = true)
-            string("submit", "true to submit", enum = listOf("true", "false"))
+            bool("submit", "Press Enter / submit the form afterwards")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val id = args.int("id") ?: throw InvalidArgsException("id")
                 val text = Json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(args.reqStr("text")))
-                val submit = args.str("submit") == "true"
-                pageLoaded = CompletableDeferred()
-                js("""(()=>{const e=document.querySelector('[data-dsh-id="$id"]');if(!e)return 'missing';e.focus();
-                    const s=Object.getOwnPropertyDescriptor(e.__proto__,'value');s&&s.set?s.set.call(e,$text):(e.value=$text);
-                    e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));
+                val submit = args.bool("submit") == true
+                val n = newNav()
+                val r = js("""(()=>{const e=document.querySelector('[data-dsh-id="$id"]');if(!e)return 'missing';e.focus();
+                    if(e.isContentEditable){document.execCommand('selectAll',false,null);document.execCommand('insertText',false,$text);}
+                    else if(!('value' in e))return 'not_editable';
+                    else{const s=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e),'value');s&&s.set?s.set.call(e,$text):(e.value=$text);
+                    e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));}
                     if($submit){e.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true}));if(e.form)e.form.requestSubmit?e.form.requestSubmit():e.form.submit();}
                     return 'ok'})()""")
-                if (submit) withTimeoutOrNull(6_000) { pageLoaded.await() }
+                if (r == "missing") throw InvalidArgsException("No element $id; call browser_read")
+                if (r == "not_editable") throw InvalidArgsException("Element $id is not a text field; pick an input/textarea from browser_read")
+                if (r != "ok") return ToolResult.error("failed", "Typing failed in the page: $r")
+                if (submit) withTimeoutOrNull(6_000) { n.done.await() }
                 delay(700)
                 return ToolResult.text("Typed.\n" + read())
             }
@@ -131,9 +147,10 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
         },
         object : Tool("browser_back", ToolGroup.Browser, Risk.read, false, "Go back in browser history.", {}) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                pageLoaded = CompletableDeferred()
+                if (!withContext(Dispatchers.Main) { view().canGoBack() }) return ToolResult.error("no_history", "There is no previous page in the browser history.")
+                val n = newNav()
                 withContext(Dispatchers.Main) { view().goBack() }
-                awaitLoad()
+                awaitLoad(n, 10_000)
                 return ToolResult.text(read())
             }
         },
@@ -142,7 +159,7 @@ class BrowserTools @Inject constructor(@ApplicationContext private val context: 
                 val v = view()
                 val bmp = Bitmap.createBitmap(v.width, v.height, Bitmap.Config.ARGB_8888)
                 v.draw(Canvas(bmp))
-                ToolResult.image("image/jpeg", Base64.encodeToString(Images.encode(bmp), Base64.NO_WRAP))
+                ToolResult.image(Images.MIME, Base64.encodeToString(Images.encode(bmp).bytes, Base64.NO_WRAP))
             }
         },
     )

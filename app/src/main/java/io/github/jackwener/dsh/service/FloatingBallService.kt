@@ -39,13 +39,11 @@ class FloatingBallService : Service() {
         val wm = getSystemService(WindowManager::class.java)
         val size = (48 * resources.displayMetrics.density).toInt()
         val margin = (8 * resources.displayMetrics.density).toInt()
-        // Full window width (displayMetrics excludes insets on some devices, which pushed the ball half off-screen).
-        val screenW = wm.currentWindowMetrics.bounds.width()
-        val screenH = wm.currentWindowMetrics.bounds.height()
+        val screenH = screenSize(wm).second
         val lp = WindowManager.LayoutParams(size, size, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = screenW - size - margin; y = screenH / 3
+            x = screenSize(wm).first - size - margin; y = screenH / 3
         }
         val v = ImageView(this).apply {
             setImageResource(R.drawable.ic_ball)
@@ -59,7 +57,11 @@ class FloatingBallService : Service() {
                 MotionEvent.ACTION_MOVE -> { lp.x = startX + (e.rawX - downX).toInt(); lp.y = startY + (e.rawY - downY).toInt(); wm.updateViewLayout(v, lp); true }
                 MotionEvent.ACTION_UP -> {
                     if (abs(e.rawX - downX) < 12 && abs(e.rawY - downY) < 12) open()
-                    else { lp.x = if (lp.x + size / 2 < screenW / 2) margin else screenW - size - margin; wm.updateViewLayout(v, lp) }
+                    else {
+                        // Re-read the size on every drop: rotation and fold changes move the far edge.
+                        val screenW = screenSize(wm).first
+                        lp.x = if (lp.x + size / 2 < screenW / 2) margin else screenW - size - margin; wm.updateViewLayout(v, lp)
+                    }
                     true
                 }
                 else -> false
@@ -68,6 +70,23 @@ class FloatingBallService : Service() {
         wm.addView(v, lp)
         view = v
         ProcessLifecycleOwner.get().lifecycle.addObserver(appInFront)
+    }
+
+    /** Full window size (displayMetrics excludes insets on some devices, which pushed the ball half off-screen). */
+    private fun screenSize(wm: WindowManager): Pair<Int, Int> =
+        if (android.os.Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.let { it.width() to it.height() }
+        else android.util.DisplayMetrics().also { @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(it) }.let { it.widthPixels to it.heightPixels }
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        val v = view ?: return
+        val lp = v.layoutParams as? WindowManager.LayoutParams ?: return
+        val wm = getSystemService(WindowManager::class.java)
+        val (w, h) = screenSize(wm)
+        val margin = (8 * resources.displayMetrics.density).toInt()
+        lp.x = if (lp.x + lp.width / 2 < w / 2) margin else w - lp.width - margin
+        lp.y = lp.y.coerceIn(0, (h - lp.height).coerceAtLeast(0))
+        runCatching { wm.updateViewLayout(v, lp) }
     }
 
     private fun open() = startActivity(Intent(this, QuickActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

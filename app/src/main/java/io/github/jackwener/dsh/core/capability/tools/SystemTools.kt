@@ -32,8 +32,11 @@ import io.github.jackwener.dsh.core.model.ToolGroup
 import io.github.jackwener.dsh.core.capability.ShellGate
 import io.github.jackwener.dsh.core.capability.ShellUse
 import io.github.jackwener.dsh.core.platform.AppVisibility
+import io.github.jackwener.dsh.core.platform.Locator
 import io.github.jackwener.dsh.core.platform.ShellUnavailableException
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -95,12 +98,12 @@ class SystemTools @Inject constructor(
                     appendLine("time: ${java.time.ZonedDateTime.now()}")
                     appendLine("battery: $level%${if (plugged) ", charging" else ""}")
                     appendLine("network: $net")
-                    appendLine("storage: ${stat.availableBytes / 1_000_000_000}GB free of ${stat.totalBytes / 1_000_000_000}GB")
+                    appendLine("storage: ${"%.1f".format(stat.availableBytes / 1e9)}GB free of ${"%.1f".format(stat.totalBytes / 1e9)}GB")
                     appendLine("ringer: ${when (audio.ringerMode) { AudioManager.RINGER_MODE_SILENT -> "silent"; AudioManager.RINGER_MODE_VIBRATE -> "vibrate"; else -> "normal" }}")
                     appendLine("volume music ${audio.getStreamVolume(AudioManager.STREAM_MUSIC)}/${audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}, ring ${audio.getStreamVolume(AudioManager.STREAM_RING)}/${audio.getStreamMaxVolume(AudioManager.STREAM_RING)}")
                     appendLine("do-not-disturb: ${nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL}")
-                    appendLine("locked: ${km.isDeviceLocked}")
-                    append("location enabled: ${context.getSystemService(LocationManager::class.java).isLocationEnabled}")
+                    appendLine("locked: ${km.isKeyguardLocked}${if (km.isKeyguardLocked && !km.isDeviceSecure) " (swipe only)" else ""}, screen ${if (context.getSystemService(android.os.PowerManager::class.java).isInteractive) "on" else "off"}")
+                    append("location enabled: ${context.getSystemService(LocationManager::class.java).isLocationEnabled} (location_get for coordinates)")
                 })
             }
 
@@ -115,8 +118,12 @@ class SystemTools @Inject constructor(
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val nm = context.getSystemService(NotificationManager::class.java)
                 val mode = args.reqStr("mode")
-                if (mode == "silent" && !nm.isNotificationPolicyAccessGranted) throw PermissionMissingException("Do Not Disturb access")
-                audio.ringerMode = when (mode) { "silent" -> AudioManager.RINGER_MODE_SILENT; "vibrate" -> AudioManager.RINGER_MODE_VIBRATE; else -> AudioManager.RINGER_MODE_NORMAL }
+                // Entering or leaving silent toggles Do Not Disturb, which needs DND access since Android 7.
+                val fromSilent = audio.ringerMode == AudioManager.RINGER_MODE_SILENT
+                if ((mode == "silent" || fromSilent) && !nm.isNotificationPolicyAccessGranted) throw PermissionMissingException("Do Not Disturb access")
+                try {
+                    audio.ringerMode = when (mode) { "silent" -> AudioManager.RINGER_MODE_SILENT; "vibrate" -> AudioManager.RINGER_MODE_VIBRATE; else -> AudioManager.RINGER_MODE_NORMAL }
+                } catch (e: SecurityException) { throw PermissionMissingException("Do Not Disturb access") }
                 return ToolResult.text("Ringer mode: $mode")
             }
         },
@@ -127,8 +134,10 @@ class SystemTools @Inject constructor(
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val s = streamOf(args.str("stream"))
                 val pct = (args.int("percent") ?: 0).coerceIn(0, 100)
-                audio.setStreamVolume(s, audio.getStreamMaxVolume(s) * pct / 100, 0)
-                return ToolResult.text("Volume ${args.str("stream")} = $pct%")
+                val max = audio.getStreamMaxVolume(s)
+                try { audio.setStreamVolume(s, (max * pct + 50) / 100, 0) }
+                catch (e: SecurityException) { throw PermissionMissingException("Do Not Disturb access") } // ring/notification 0 ↔ silent
+                return ToolResult.text("Volume ${args.str("stream") ?: "music"} = $pct% (${audio.getStreamVolume(s)}/$max)")
             }
         },
         object : Tool("dnd_set", ToolGroup.System, Risk.write, false, "Turn Do Not Disturb on or off.", {
@@ -141,7 +150,8 @@ class SystemTools @Inject constructor(
                 return ToolResult.text("Do Not Disturb ${if (args.bool("on") == true) "on" else "off"}")
             }
         },
-        object : Tool("brightness_set", ToolGroup.System, Risk.write, false, "Set screen brightness 0-100, or auto.", {
+        object : Tool("brightness_set", ToolGroup.System, Risk.write, false,
+            "Set screen brightness 0-100 (perceptual, like the system slider), or auto.", {
             int("percent", "0-100"); bool("auto", "Use adaptive brightness")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
@@ -153,7 +163,9 @@ class SystemTools @Inject constructor(
                 }
                 val pct = (args.int("percent") ?: throw InvalidArgsException("percent or auto")).coerceIn(0, 100)
                 Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS_MODE, Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL)
-                Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, (pct * 255 / 100).coerceAtLeast(1))
+                // The system slider is perceptual (roughly gamma 2.2), so 50% on it is ~22% of the raw 0..255 range.
+                val raw = (Math.pow(pct / 100.0, 2.2) * 255).toInt().coerceIn(1, 255)
+                Settings.System.putInt(cr, Settings.System.SCREEN_BRIGHTNESS, raw)
                 return ToolResult.text("Brightness $pct%")
             }
         },
@@ -162,24 +174,52 @@ class SystemTools @Inject constructor(
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val cm = context.getSystemService(CameraManager::class.java)
-                val id = cm.cameraIdList.first { cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true }
-                cm.setTorchMode(id, args.bool("on") == true)
+                val id = cm.cameraIdList.firstOrNull { cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true }
+                    ?: return ToolResult.error("unsupported", "This phone has no camera flash.")
+                try { cm.setTorchMode(id, args.bool("on") == true) }
+                catch (e: android.hardware.camera2.CameraAccessException) {
+                    return ToolResult.error("failed", "The flashlight is unavailable right now (the camera is in use by another app). Try again after closing the camera.")
+                }
                 return ToolResult.text("Flashlight ${if (args.bool("on") == true) "on" else "off"}")
             }
         },
-        object : Tool("alarm_set", ToolGroup.System, Risk.write, true, "Create an alarm in the clock app (or a countdown timer).", {
+        // needsUnlock = true: the clock app handles the request in an activity, which Android only starts
+        // reliably on an unlocked screen (and some clocks show a confirmation page).
+        object : Tool("alarm_set", ToolGroup.System, Risk.write, true,
+            "Create an alarm in the clock app (optionally repeating), or start a countdown timer. Needs the phone unlocked.", {
             int("hour", "0-23"); int("minute", "0-59"); string("label", "Label")
-            int("timerSeconds", "If set, start a countdown timer instead")
+            raw("days", buildJsonObject {
+                put("type", "array"); put("description", "Repeat on these weekdays (1=Mon … 7=Sun); omit for a one-time alarm")
+                put("items", buildJsonObject { put("type", "integer") })
+            })
+            int("timerSeconds", "If set, start a countdown timer instead (1-86400)")
         }) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
                 val timer = args.int("timerSeconds")
-                val i = if (timer != null) Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, timer)
-                else Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, args.int("hour") ?: throw InvalidArgsException("hour"))
-                    .putExtra(AlarmClock.EXTRA_MINUTES, args.int("minute") ?: 0)
+                val i = if (timer != null) {
+                    if (timer !in 1..86_400) throw InvalidArgsException("timerSeconds must be 1..86400")
+                    Intent(AlarmClock.ACTION_SET_TIMER).putExtra(AlarmClock.EXTRA_LENGTH, timer)
+                } else {
+                    val hour = args.int("hour") ?: throw InvalidArgsException("missing 'hour' (0-23)")
+                    val minute = args.int("minute") ?: 0
+                    if (hour !in 0..23 || minute !in 0..59) throw InvalidArgsException("hour must be 0-23 and minute 0-59")
+                    Intent(AlarmClock.ACTION_SET_ALARM).putExtra(AlarmClock.EXTRA_HOUR, hour).putExtra(AlarmClock.EXTRA_MINUTES, minute).also { a ->
+                        // AlarmClock uses Calendar days (Sun=1 … Sat=7).
+                        val days = (args["days"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { (it as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() }
+                        if (!days.isNullOrEmpty()) {
+                            if (days.any { it !in 1..7 }) throw InvalidArgsException("days must be 1..7 (Mon=1)")
+                            a.putIntegerArrayListExtra(AlarmClock.EXTRA_DAYS, ArrayList(days.map { it % 7 + 1 }))
+                        }
+                    }
+                }
                 args.str("label")?.let { i.putExtra(AlarmClock.EXTRA_MESSAGE, it) }
                 i.putExtra(AlarmClock.EXTRA_SKIP_UI, true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(i)
-                return ToolResult.text(if (timer != null) "Timer set for ${timer}s" else "Alarm set ${args.int("hour")}:${"%02d".format(args.int("minute") ?: 0)}")
+                try { context.startActivity(i) }
+                catch (e: android.content.ActivityNotFoundException) { return ToolResult.error("unsupported", "No clock app on this phone handles alarms/timers.") }
+                catch (e: SecurityException) { return ToolResult.error("failed", "The clock app refused the request: ${e.message}") }
+                val what = if (timer != null) "a ${timer}s timer" else "an alarm at ${args.int("hour")}:${"%02d".format(args.int("minute") ?: 0)}"
+                return ToolResult.text("Sent $what to the clock app. Some clock apps show a confirmation page instead of saving silently; " +
+                    "check the screen (screen_read) or the clock app if it matters.")
             }
         },
         object : Tool("wifi_toggle", ToolGroup.System, Risk.write, false,
@@ -214,6 +254,63 @@ class SystemTools @Inject constructor(
                 val on = args.bool("on") == true
                 if (gate.acquire(call, name, optional = true)) shellOrNull("svc data ${if (on) "enable" else "disable"}", "switch mobile data ${if (on) "on" else "off"}")?.let { return it }
                 return openForUser(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY), "switch mobile data ${if (on) "on" else "off"}")
+            }
+        },
+        object : Tool("setting_get", ToolGroup.System, Risk.read, false,
+            "Read Android settings: one key, or (key omitted, needs Shizuku) every key in a namespace matching filter. Common keys: " +
+                "global airplane_mode_on, mobile_data, wifi_on, bluetooth_on, auto_time; system screen_off_timeout (ms), screen_brightness (0-255), " +
+                "screen_brightness_mode, accelerometer_rotation (auto-rotate), font_scale; secure location_mode, default_input_method, ui_night_mode.",
+            {
+                string("namespace", "", required = true, enum = listOf("system", "secure", "global"))
+                string("key", "Setting key (omit to list)"); string("filter", "When listing: only keys containing this")
+            }, ShellUse.Fallback, "read public keys directly (listing and hidden keys need Shizuku)") {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val ns = args.reqStr("namespace")
+                val key = args.str("key")?.filter { it.isLetterOrDigit() || it in "_." }
+                if (key == null) {
+                    val r = runCatching { shell("settings list $ns", "list settings") }.getOrNull()
+                        ?: return ToolResult.error("shizuku_unavailable", "Listing settings needs Shizuku (${gate.access.state.value.reason}); read a specific key instead.")
+                    if (!r.ok) return r
+                    val f = args.str("filter")?.lowercase()
+                    val lines = (r.content.firstOrNull() as? io.github.jackwener.dsh.core.capability.Content.Text)?.text.orEmpty()
+                        .removePrefix("Done via Shizuku: list settings.").lines().map { it.trim() }.filter { it.isNotEmpty() && (f == null || it.lowercase().contains(f)) }
+                    return ToolResult.text(lines.take(300).joinToString("\n").ifEmpty { "No matching keys." } + if (lines.size > 300) "\n…(${lines.size - 300} more; use filter)" else "")
+                }
+                val cr = context.contentResolver
+                val direct = runCatching {
+                    when (ns) { "system" -> Settings.System.getString(cr, key); "secure" -> Settings.Secure.getString(cr, key); else -> Settings.Global.getString(cr, key) }
+                }
+                direct.getOrNull()?.let { return ToolResult.text("$ns $key = $it") }
+                if (shizuku.available) {
+                    val r = shizuku.exec("settings get $ns $key")
+                    if (r.code == 0) return ToolResult.text("$ns $key = ${r.output.trim()} (via Shizuku)")
+                }
+                return if (direct.isFailure) ToolResult.error("not_authorized", "Android does not let apps read $ns/$key (${direct.exceptionOrNull()?.javaClass?.simpleName}); it needs Shizuku.")
+                else ToolResult.text("$ns $key is not set (null).")
+            }
+        },
+        object : Tool("location_get", ToolGroup.System, Risk.sensitive, false,
+            "The phone's current location: latitude/longitude, accuracy, age, and the street address when the system geocoder has one. " +
+                "Use it for geofence rules (\"remind me when I get home\") and \"where am I\".", {
+                bool("precise", "Ask for a fresh GPS-quality fix (slower, default true)")
+            }) {
+            override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
+                val fine = context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                val coarse = context.checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                if (!fine && !coarse) throw PermissionMissingException("Location")
+                val lm = context.getSystemService(LocationManager::class.java)
+                if (!lm.isLocationEnabled) return ToolResult.error("location_off", "Location is turned off on the phone. Ask the user to turn it on (quick settings).")
+                val loc = Locator.current(context, precise = args.bool("precise") != false && fine)
+                    ?: return ToolResult.error("location_unavailable", "No location fix within 20s. " +
+                        (if (!AppVisibility.isForeground && context.checkSelfPermission(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                            "DSH is in the background without 'Allow all the time' location access; ask the user to grant it or open DSH and retry." else "The phone may be indoors; try again or use precise=false."))
+                val ageS = ((System.currentTimeMillis() - loc.time) / 1000).coerceAtLeast(0)
+                val address = Locator.address(context, loc.latitude, loc.longitude)
+                return ToolResult.text(buildString {
+                    append("lat=${"%.6f".format(loc.latitude)} lng=${"%.6f".format(loc.longitude)} accuracy=${loc.accuracy.toInt()}m age=${ageS}s provider=${loc.provider}")
+                    if (!fine) append(" (approximate: only coarse location is granted)")
+                    address?.let { append("\naddress: $it") }
+                })
             }
         },
         object : Tool("setting_put", ToolGroup.System, Risk.dangerous, false,

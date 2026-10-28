@@ -9,14 +9,3 @@
  			"-c",
  			spec.command
  		]);
---- a/@deepseek-ai/dsh-bash-sandbox/lib/index.js
-+++ b/@deepseek-ai/dsh-bash-sandbox/lib/index.js
-@@ -160,7 +160,7 @@
- 	*/
- 	confine(command, policy, signal) {
- 		return this.ctx.sandbox.confine([
--			"bash",
-+			process.env.DSH_BASH_SHELL || (process.platform === "android" ? "/system/bin/sh" : "bash"),
- 			"-c",
- 			command
- 		], policy, signal);

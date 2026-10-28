@@ -12,7 +12,8 @@ sealed interface DeviceEvent {
     data class Wifi(val connected: Boolean, val ssid: String?) : DeviceEvent
     data class Bluetooth(val connected: Boolean, val deviceName: String?) : DeviceEvent
     data class Power(val connected: Boolean) : DeviceEvent
-    data class Battery(val percent: Int) : DeviceEvent
+    /** [previous] is the last level the monitor saw (null right after it started). */
+    data class Battery(val percent: Int, val previous: Int?, val charging: Boolean) : DeviceEvent
     data class Headset(val plugged: Boolean) : DeviceEvent
     data class Screen(val event: String) : DeviceEvent
     data class Notification(val packageName: String, val title: String, val text: String) : DeviceEvent
@@ -30,7 +31,7 @@ object TriggerEvents {
 
     fun init(context: Context) { hub = EntryPointAccessors.fromApplication(context, TriggerEntryPoint::class.java).triggerHub() }
 
-    fun emit(event: DeviceEvent) { hub?.onEvent(event) }
+    fun emit(event: DeviceEvent) { runCatching { hub?.onEvent(event) } }
     fun appOpened(pkg: String) = emit(DeviceEvent.AppOpened(pkg))
     fun notificationPosted(pkg: String, title: String, text: String) = emit(DeviceEvent.Notification(pkg, title, text))
 }

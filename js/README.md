@@ -19,7 +19,7 @@ this directory implements the dsh side of it.
 | `scripts/make-zip.py` | deterministic zip (sorted, fixed mtimes, rejects symlinks). |
 | `build-engine.sh` | the build (below). |
 | `test/hardline.test.mjs` | unit tests for the hardline checker (`node --test js/test/hardline.test.mjs`). |
-| `test/host-e2e.mjs` | host end-to-end run of the built `engine.zip` with a fake capability bridge and the real DeepSeek API. |
+| `test/host-e2e.mjs` | host end-to-end run of the built `engine.zip` with a fake capability bridge and the real DeepSeek API; phase E repeats it with `process.platform` faked to `android` (approval policy, time zone, unattended runs). |
 
 The plugins are plain ESM JavaScript with no dependencies outside `node:` built-ins, so there is no compile step.
 
@@ -159,6 +159,11 @@ revocation; `llm-deepseek-account` = the `deepseek-account` model route). The pl
 
 ## Patches
 
+Patch targets must be stable file names (`lib/index.js`, …). `build-engine.sh` refuses a patch whose target is
+missing and resolves a content-hashed chunk name (`name-XXXXXXXX.js`) to the single current chunk of that name, so a dsh
+upgrade that renames chunks fails loudly or keeps working instead of silently skipping. Patch 08 is a backport of
+rc.3 and must be dropped when upgrading (or it double-registers `approval/request`).
+
 All are written so they are inert on desktop Linux unless the corresponding env var is set (the host e2e sets
 `DSH_NATIVE_DIR` to exercise the exact Android code paths with host bindings).
 
@@ -166,14 +171,14 @@ All are written so they are inert on desktop Linux unless the corresponding env 
 |---|---|---|
 | `01-flock-android` | `@deepseek-ai/node-addon-system` | `flock` threw `ERR_FLOCK_UNSUPPORTED_PLATFORM` on `android` (session write lease depends on it). Loads `$DSH_NATIVE_DIR/libdsh_flock.so` via `process.dlopen` (Node's `require` only treats `*.node` as native). |
 | `02-require-builtin-expose-internals` | `node-addon-require-builtin` | dsh-app-boot, cordis-plugin-loader and dsh-hmr use this addon only to obtain Node *internal* modules (`internal/modules/esm/loader`, `…/cjs/loader`, `…/helpers`, `…/esm/utils`, `…/esm/resolve`, `internal/bootstrap/realm`) — not reachable through `process.getBuiltinModule`, which serves public builtins only. The engine is started with `--expose-internals` (argv; Node refuses it in `NODE_OPTIONS`), and the patched entry resolves ids with plain `require()`, so no native binding (which decoded Node getter machine code to find struct offsets) is loaded or shipped. Without the flag the upstream native path runs unchanged (except on android, where it throws a clear error). |
-| `03-node-pty-android` | `node-pty`, `@deepseek-ai/dsh-subprocess-local` | node-pty loads `$DSH_NATIVE_DIR/libdsh_pty.so` (spawn-helper is macOS-only); subprocess-local's process inspector accepted only `linux` (`/proc` works the same on Android). Only needed if a persistent terminal is enabled — the android profile does not mount one today. |
-| `04-shell-system-bin-sh` | `@deepseek-ai/dsh-bash-local`, `dsh-bash-sandbox` | The `bash` tool hardcodes `bash -c`; on android it uses `/system/bin/sh -c` (override: `DSH_BASH_SHELL`). No config knob exists for this. |
+| `04-shell-system-bin-sh` | `@deepseek-ai/dsh-bash-local` | The `bash` tool hardcodes `bash -c`; on android it uses `/system/bin/sh -c` (override: `DSH_BASH_SHELL`). No config knob exists for this. (`dsh-bash-sandbox` needs no patch: in `danger-full-access` it short-circuits to the local executor, and in any confining mode `sandbox-local` fails closed on android anyway.) |
 | `05-hardlink-copy-fallback` | `dsh-attachment-local`, `dsh-session-persistence-jsonl` | `link(2)` is denied (EACCES/EPERM) in Android app storage. Both packages publish files with `link` (session generations too, not just attachments). Fallback: exclusive copy to a sibling temp + rename, keeping link's EEXIST semantics. |
 | `06-ripgrep-from-path` | `dsh-tool-fs-search` | `@vscode/ripgrep` has no android build (and its binaries are pruned): use `DSH_RG_PATH`, else `rg` from `PATH` (app provides `files/bin/rg → librg.so`). |
 | `07-android-profile-template` | `dsh-app-boot` | Adds `android` to the shipped profile templates so `--profile android` self-initializes in `DSH_HOME`. |
 | `08-sdk-approval-user-questions` | `dsh-sdk-jsonrpc-server` | **rc.2's SDK server has no `approval/request` / `user-question/ask`** (they first appear in 0.2.1-rc.3). Backport of the rc.3 bridge: `initialize { approvalRequests, capabilities.userQuestions }`, server→client `approval/request {sessionId, toolName, callId?, reason?, rootSessionId?}` → `{outcome}` and `user-question/ask` → `{answers}` + `user-question.cancelled`. Without it every approval fails closed (`unavailable`). |
 | `09-sharp-wasm-android` | `sharp` | Attachment storage (images from tools *and* prompt images) needs sharp; there is no bionic libvips build. On `android-*` sharp loads its WebAssembly build (`@img/sharp-freebsd-wasm32` → `@img/sharp-wasm32`, added by the build). |
-| `10-sdk-extension-methods` | `dsh-sdk-jsonrpc-server` | The SDK server has a closed method switch. Unknown methods now resolve through an optional `sdkExtensions` service (`{ resolve(method) }`, after the loader settles, no `initialize` needed), and plugins can emit SDK notifications with `ctx.emit('sdk-extensions/notify', method, params)`. Used by plugin-account. |
+| `10-sdk-extension-methods` | `dsh-sdk-jsonrpc-server` | The SDK server has a closed method switch. Unknown methods now resolve through an optional `sdkExtensions` service (`{ resolve(method) }`) or a `sdk-extensions/resolve` bail listener (after the loader settles, no `initialize` needed), and plugins can emit SDK notifications with `ctx.emit('sdk-extensions/notify', method, params)`. Used by plugin-account (service) and plugin-guard (listener). Upgrade risk: upstream may add its own extension seam or `account/*` names — re-check on every dsh bump. |
+| `11-sdk-prompt-time-zone` | `dsh-sdk-jsonrpc-server` | `dsh-time-context` takes the user's zone from a user-rpc message source (the Web host's `clientTimeZone`); SDK prompts carried none, so every time reading said "time zone unavailable, ask the user to clarify dates". SDK prompts now carry `{ rpcId, clientTimeZone }` from the optional `session/prompt` `clientTimeZone` param, else the process `TZ` (the app sets `TZ` / `DSH_ANDROID_TZ`; android-env applies it). |
 
 Not patched (and why):
 - `terminal-bash` `DEFAULT_BASH_SHELL=/bin/bash` and `dsh-api-workspace-controller` (no android branch): not mounted by
@@ -186,8 +191,8 @@ Not patched (and why):
 ## What the Kotlin side must do
 
 - Unzip `engine.zip` to `<filesDir>/engine/<engine-version.txt>/` after checking `engine.sha256`; launch exactly as in the contract.
-- Environment per ENGINE-CONTRACT §1. Notes: `DSH_NATIVE_DIR` is **required** on Android (flock and pty load from
-  there; names `libdsh_flock.so`, `libdsh_pty.so`). Start Node with `--expose-internals` (patch 02). `HOME` must exist (it is the workspace root);
+- Environment per ENGINE-CONTRACT §1. Notes: `DSH_NATIVE_DIR` is **required** on Android (flock loads from
+  there; name `libdsh_flock.so`; `libdsh_pty.so` is unused until a terminal row is mounted). Start Node with `--expose-internals` (patch 02). `HOME` must exist (it is the workspace root);
   `TMPDIR` must exist. `files/bin/rg` must be on `PATH` for `grep`/`glob`. Optional: `DSH_TELEMETRY_DISABLED=1`
   (telemetry row is already disabled by the bundle).
 - No profile init step: first launch writes `$DSH_HOME/profiles/android/`.
@@ -196,6 +201,9 @@ Not patched (and why):
   (`Android files tool "file_write" (risk: write) wants to run with {…}` / `bash: <command>`); the app already knows each
   device tool's `risk`/`group` from `capability/list`, and `toolName` + `callId` match the `tool/call` session event.
   Approval requests from subagents carry the child `sessionId` plus `rootSessionId`.
+- Send `android/session/permission {sessionId, preset}` before each `session/prompt` and on every permission-mode
+  change (ENGINE-CONTRACT §2); without it 仅可查看 refusals cannot name the mode and HOME writes keep asking.
+- Set `TZ` and `DSH_ANDROID_TZ` to the device zone (ENGINE-CONTRACT §1).
 - Bridge: answer `capability/list` / `capability/invoke`; send `capability/changed` and `budget/update` notifications; ignore
   unknown notifications from Node (`budget/exceeded` is sent when a budget refuses a step).
 - `user-question/ask { requestId, sessionId, questions }` → `{ answers: [{ id, selected: string[], custom? }] }`.

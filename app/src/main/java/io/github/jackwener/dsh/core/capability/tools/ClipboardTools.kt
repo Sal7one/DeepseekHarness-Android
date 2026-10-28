@@ -28,13 +28,21 @@ class ClipboardTools @Inject constructor(@ApplicationContext private val context
             "Read the clipboard text. Android only allows this while DSH is in the foreground (or via Shizuku).", {},
             ShellUse.Fallback, "only work while DSH is in the foreground") {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                val text = withContext(Dispatchers.Main) { cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() }
-                if (text != null) return ToolResult.text(text)
-                if (shizuku.available) {
-                    val r = shizuku.exec("cmd clipboard get-primary-clip 2>/dev/null || service call clipboard 2")
-                    if (r.code == 0 && r.output.isNotBlank()) return ToolResult.text("(read via Shizuku) " + r.output.trim())
+                val (readable, text) = withContext(Dispatchers.Main) {
+                    val clip = runCatching { cm.primaryClip }.getOrNull()
+                    (clip != null) to clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
                 }
-                return ToolResult.error("failed", "Clipboard is not readable right now: Android restricts background access and ${shizuku.access.state.value.reason}.")
+                if (text != null) return ToolResult.text(text.ifEmpty { "(the clipboard holds empty text)" })
+                // In front, a null clip really means empty (in the background Android hides it, so it says nothing).
+                if (!readable && io.github.jackwener.dsh.core.platform.AppVisibility.isForeground) return ToolResult.text("The clipboard is empty.")
+                if (shizuku.available) {
+                    // `cmd clipboard` exists on Android 13+; the old `service call` path prints a binder Parcel dump, which is not text.
+                    val r = shizuku.exec("cmd clipboard get-primary-clip 2>/dev/null")
+                    val out = r.output.trim()
+                    if (r.code == 0 && out.isNotEmpty() && !out.startsWith("Result: Parcel") && !out.contains("Unknown command"))
+                        return ToolResult.text("(read via Shizuku) " + out.removePrefix("ClipData { text/plain ").removeSuffix("}"))
+                }
+                return ToolResult.error("failed", "Clipboard is not readable right now: Android only lets the app in front read it, and ${shizuku.access.state.value.reason}. Open DSH and retry, or ask the user to paste it.")
             }
         },
         object : Tool("clipboard_set", ToolGroup.Clipboard, Risk.write, false, "Put text on the clipboard.", {

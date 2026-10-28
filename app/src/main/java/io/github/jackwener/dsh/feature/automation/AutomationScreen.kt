@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import io.github.jackwener.dsh.core.designsystem.EmptyNote
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -112,7 +114,7 @@ fun AutomationScreen(onBack: () -> Unit, onNew: (String) -> Unit, onOpenRule: (L
     val shown = rules.filter { r ->
         when (filter) { RuleFilter.All -> true; RuleFilter.On -> r.entity.enabled; RuleFilter.Off -> !r.entity.enabled }
     }.filter { r -> query.isBlank() || (r.spec?.name ?: "").contains(query, true) || (r.spec?.let { describeTrigger(it.trigger, zh) } ?: "").contains(query, true) }
-    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
+    Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding().imePadding()) {
         DTopBar(stringResource(R.string.automation), onBack) {
             DButton(stringResource(R.string.new_), { onNew(context.getString(R.string.new_rule_prefill)) }, size = BtnSize.Sm, icon = R.drawable.dsw_plus_outline, modifier = Modifier.padding(end = 8.dp))
         }
@@ -133,6 +135,7 @@ fun AutomationScreen(onBack: () -> Unit, onNew: (String) -> Unit, onOpenRule: (L
             Spacer(Modifier.height(16.dp))
             DButton(stringResource(R.string.new_rule_via_chat), { onNew(context.getString(R.string.new_rule_prefill)) }, variant = BtnVariant.Outline)
         } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (shown.isEmpty()) item { EmptyNote(stringResource(R.string.no_matching_rules)) }
             items(shown, key = { it.entity.id }) { r -> RuleCard(r, zh, { onOpenRule(r.entity.id) }) { vm.toggle(r.entity.id, it) } }
             item { Spacer(Modifier.navigationBarsPadding()) }
         }
@@ -204,7 +207,14 @@ fun RuleDetailScreen(onBack: () -> Unit, onOpenSession: (String) -> Unit, vm: Au
             SettingsCard {
                 if (runs.isEmpty()) SettingsRow(stringResource(R.string.rule_no_runs), divider = false)
                 runs.forEachIndexed { i, run ->
-                    SettingsRow(Fmt.dateTime(run.firedAt), run.outcome, onClick = run.sessionId?.let { sid -> { onOpenSession(sid) } }, divider = i > 0,
+                    val outcome = when {
+                        run.outcome == "ok" -> stringResource(R.string.run_outcome_ok)
+                        run.outcome == "started" -> stringResource(R.string.run_outcome_started)
+                        run.outcome.startsWith("fail") || run.outcome.startsWith("error") ->
+                            stringResource(R.string.run_outcome_failed, run.outcome.substringAfter(':', "").trim().ifEmpty { run.outcome })
+                        else -> run.outcome
+                    }
+                    SettingsRow(Fmt.dateTime(run.firedAt), outcome, onClick = run.sessionId?.let { sid -> { onOpenSession(sid) } }, divider = i > 0,
                         leading = { StateDot(when { run.outcome == "ok" || run.outcome == "started" -> DotKind.Done; run.outcome.startsWith("fail") || run.outcome.startsWith("error") -> DotKind.Error; else -> DotKind.Idle }) },
                         trailing = if (run.sessionId != null) ({ Text(stringResource(R.string.open_session), style = DshType.xs13, color = c.link) }) else null)
                 }
@@ -221,7 +231,7 @@ fun RuleDetailScreen(onBack: () -> Unit, onOpenSession: (String) -> Unit, vm: Au
 }
 
 fun describeTrigger(t: Trigger, zh: Boolean): String = when (t) {
-    is Trigger.Time -> t.at?.let { (if (zh) "每天 " else "Daily ") + it + if (t.days.isNotEmpty()) " (${t.days.joinToString(",")})" else "" }
+    is Trigger.Time -> t.at?.let { (if (zh) "每天 " else "Daily ") + it + if (t.days.isNotEmpty()) " (${t.days.joinToString(if (zh) "、" else ", ") { weekday(it, zh) }})" else "" }
         ?: t.everyMinutes?.let { if (zh) "每 $it 分钟" else "Every $it min" }
         ?: t.onceAtEpochMs?.let { (if (zh) "单次 · " else "Once · ") + Fmt.dateTime(it) } ?: (if (zh) "单次" else "Once")
     is Trigger.Wifi -> (if (t.connected) (if (zh) "连上 Wi‑Fi" else "Wi‑Fi connected") else (if (zh) "断开 Wi‑Fi" else "Wi‑Fi disconnected")) + (t.ssid?.let { " $it" } ?: "")
@@ -237,7 +247,13 @@ fun describeTrigger(t: Trigger, zh: Boolean): String = when (t) {
 
 fun describeCondition(c: Condition, zh: Boolean): String = when (c) {
     is Condition.TimeRange -> (if (zh) "时间 " else "Time ") + "${c.from}–${c.to}"
-    is Condition.Days -> (if (zh) "星期 " else "Days ") + c.days.joinToString(",")
+    is Condition.Days -> (if (zh) "星期" else "Days ") + c.days.joinToString(if (zh) "、" else ", ") { weekday(it, zh) }
     is Condition.Battery -> (if (zh) "电量 " else "Battery ") + listOfNotNull(c.min?.let { "≥$it%" }, c.max?.let { "≤$it%" }).joinToString(" ")
     is Condition.Charging -> if (c.charging) (if (zh) "充电中" else "Charging") else (if (zh) "未充电" else "Not charging")
 }
+
+/** 1 = Monday … 7 = Sunday (ISO), as 一…日 / Mon…Sun. */
+private fun weekday(d: Int, zh: Boolean): String =
+    runCatching { java.time.DayOfWeek.of(d) }.getOrNull()?.let {
+        if (zh) "一二三四五六日"[it.value - 1].toString() else it.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH)
+    } ?: d.toString()

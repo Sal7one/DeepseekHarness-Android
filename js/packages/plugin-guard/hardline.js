@@ -354,13 +354,29 @@ function checkText(text, ctx, depth) {
       }
     }
   }
+  // `cd X && rm -rf *`: a `cd` moves the directory later commands resolve against. Commands are
+  // judged in order with the cwd every earlier `cd` produced (subshell scoping is ignored, which
+  // only ever makes the check stricter).
+  let local = ctx
   for (const { words, redirects } of commands) {
-    const argv = words.map(w => expandVars(w, ctx.env))
+    const argv = words.map(w => expandVars(w, local.env))
     const segment = words.join(' ')
-    const v = checkSimple(argv, redirects.map(r => expandVars(r, ctx.env)), ctx, segment, depth)
+    const v = checkSimple(argv, redirects.map(r => expandVars(r, local.env)), local, segment, depth)
     if (v !== undefined) return v
+    const cwd = cdTarget(argv, local)
+    if (cwd !== undefined) local = { ...local, cwd }
   }
   return undefined
+}
+
+/** The directory a simple `cd` command switches to, or undefined when it is not a resolvable cd. */
+function cdTarget(argv, ctx) {
+  const a = unwrap(argv)
+  if (baseName(a[0] ?? '') !== 'cd' && a[0] !== 'pushd') return undefined
+  const operand = a.slice(1).find(w => !/^-[LPe@]*$/.test(w))
+  if (operand === undefined) return ctx.env.HOME
+  if (operand === '-' || /[*?[$`]/.test(operand)) return undefined
+  return path.posix.normalize(operand.startsWith('/') ? operand : path.posix.join(ctx.cwd || '/', operand))
 }
 
 /** The model-facing refusal text (also used as the denial reason). */
@@ -370,4 +386,83 @@ export function refusalText(v) {
     'Do not retry it or work around it with another command or tool. Tell the user it was blocked, and if they ' +
     'need something narrower (for example deleting specific files), propose that instead. ' +
     `Blocked segment: ${JSON.stringify(v.segment)}`
+}
+
+// ── read-only classifier (approval friction, not a security boundary) ───────
+// `isReadOnlyCommand(text)` is true when every simple command in `text` (including
+// $(...)/backtick substitutions) is an inspection command from READ_ONLY with
+// read-only arguments and no output redirect other than /dev/null or an fd
+// duplicate. plugin-guard runs such commands without asking for approval.
+
+const positional = args => args.filter(w => !w.startsWith('-'))
+const lacks = (...flags) => args => !args.some(w => flags.some(f => f instanceof RegExp ? f.test(w) : w === f || w.startsWith(`${f}=`)))
+const always = () => true
+const firstWord = args => positional(args).filter(w => !/^\d+$/.test(w))[0]
+
+/** command name → predicate over its arguments (argv without the command). */
+const READ_ONLY = new Map(Object.entries({
+  ls: always, cat: always, head: always, wc: always, stat: always, file: always, du: always, df: always, pwd: always,
+  echo: always, printf: always, true: always, false: always, ':': always, test: always, '[': always, which: always,
+  type: always, basename: always, dirname: always, realpath: always, readlink: always, getprop: always, ps: always,
+  id: always, whoami: always, groups: always, uname: always, uptime: always, free: always, nproc: always, sleep: always,
+  grep: always, egrep: always, fgrep: always, cut: always, tr: always, nl: always, od: always, hexdump: always,
+  strings: always, md5sum: always, sha1sum: always, sha256sum: always, sha512sum: always, cksum: always, cmp: always,
+  diff: always, comm: always, tree: always, column: always, seq: always, jq: always, base64: always, rev: always,
+  tac: always, paste: always, fold: always, expand: always, lsof: always, getenforce: always, cd: always, pushd: always,
+  popd: always,
+  tail: lacks('-f', '-F', '--follow', /^-[A-Za-z0-9]*[fF]/),
+  rg: lacks('--pre'),
+  sort: lacks('-o', '--output', /^-[A-Za-z]*o/),
+  uniq: args => positional(args).length <= 1,
+  xxd: args => !args.includes('-r') && positional(args).length <= 1,
+  date: args => args.every(w => w.startsWith('+') || /^-(u|R|I\w*)$/.test(w)),
+  find: lacks('-delete', '-exec', '-execdir', '-ok', '-okdir', '-fprint', '-fprint0', '-fprintf', '-fls'),
+  dumpsys: args => !args.some(w => /^(set|reset|unplug|enable|disable|clear|--reset|-c)$/.test(w)),
+  settings: args => ['get', 'list'].includes(firstWord(args.filter((w, i) => args[i - 1] !== '--user'))),
+  pm: args => /^(list|path|dump|has-feature|resolve-activity|query-activities|query-services|query-receivers)$/.test(firstWord(args) ?? ''),
+  logcat: args => args.some(w => /^-[A-Za-z]*d/.test(w)) && !args.some(w => /^-[A-Za-z]*[cfG]/.test(w) || w === '--clear' || w.startsWith('--file')),
+  ifconfig: args => args.length === 0,
+}))
+// `cmd <service> …` → the equivalent standalone tool.
+const CMD_SERVICES = new Map([['package', 'pm'], ['settings', 'settings']])
+/** Shell keywords that wrap commands without running anything themselves. */
+const KEYWORDS = new Set(['if', 'while', 'until', 'then', 'do', 'else', 'elif', '!', '{', '}'])
+const NO_OPS = new Set(['fi', 'done', 'esac'])
+const SAFE_REDIRECT = /^(\/dev\/null|&?\d+|-)$/
+
+function readOnlySimple(words, redirects, env) {
+  if (!redirects.every(r => SAFE_REDIRECT.test(r))) return false
+  let argv = words.map(w => expandVars(w, env))
+  while (argv.length > 0 && KEYWORDS.has(argv[0])) argv = argv.slice(1)
+  if (argv.length === 0 || (argv.length === 1 && NO_OPS.has(argv[0]))) return true
+  // `for NAME in WORDS` only binds a variable.
+  if (argv[0] === 'for') return /^[A-Za-z_]\w*$/.test(argv[1] ?? '') && (argv.length === 2 || argv[2] === 'in')
+  // Assignments that redirect what later names resolve to are not read-only.
+  if (argv.some(w => /^(PATH|LD_PRELOAD|LD_LIBRARY_PATH|ENV|BASH_ENV)=/.test(w))) return false
+  if (baseName(argv[0]) === 'env' && unwrap(argv).length === 0) return false // `env` alone prints secrets
+  const a = unwrap(argv)
+  if (a.length === 0) return argv.every(w => /^[A-Za-z_]\w*=/.test(w))
+  const head = a[0]
+  if (head.includes('/') && !/^\/system\/x?bin\/[^/]+$/.test(head)) return false
+  let cmd = baseName(head)
+  let args = a.slice(1)
+  if (cmd === 'cmd' && CMD_SERVICES.has(args[0])) { cmd = CMD_SERVICES.get(args[0]); args = args.slice(1) }
+  const rule = READ_ONLY.get(cmd)
+  return rule !== undefined && rule(args)
+}
+
+/**
+ * Whether a shell command only inspects state (see READ_ONLY above).
+ * @param {string} text - the command as the model wrote it.
+ * @param {{ env?: Record<string,string|undefined> }} [options]
+ */
+export function isReadOnlyCommand(text, options = {}) {
+  if (typeof text !== 'string' || text.trim() === '') return false
+  const env = { ...process.env, ...options.env }
+  const visit = (t, depth) => {
+    if (depth > MAX_DEPTH) return false
+    const { commands, nested } = splitCommands(t.replace(/\\\n/g, ' '))
+    return nested.every(n => visit(n, depth + 1)) && commands.every(c => readOnlySimple(c.words, c.redirects, env))
+  }
+  return visit(text, 0)
 }

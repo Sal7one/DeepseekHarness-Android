@@ -12,9 +12,30 @@
 //   - NODE_OPTIONS                -> handled by the app, which passes those flags in argv instead
 // This preload restores the first three from process.env before dsh loads. It changes nothing
 // when Node already honours the environment (host runs), unless DSH_ANDROID_ENV_FORCE=1 (tests).
+//
+// Time zone: Android has no TZ / /etc/localtime that Node's ICU reads, so the process would run
+// in UTC (wrong dates in the prompt's time context, budget day rollover at UTC midnight). The app
+// passes the device zone as TZ and DSH_ANDROID_TZ; if the zone ICU resolved differs (TZ unset
+// or not honoured), assigning process.env.TZ makes Node reset ICU's default zone.
 
 const os = require('node:os')
+const { isMainThread } = require('node:worker_threads')
 const env = process.env
+// Workers re-run this preload (they need the tmpdir fix too); only the main thread logs.
+const note = message => { if (isMainThread) process.stderr.write(`android-env: ${message}\n`) }
+
+const wantZone = env.DSH_ANDROID_TZ || ''
+if (wantZone !== '') {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: wantZone }) // throws for an unknown zone
+    if (Intl.DateTimeFormat().resolvedOptions().timeZone !== wantZone) {
+      env.TZ = wantZone
+      note(`time zone ${Intl.DateTimeFormat().resolvedOptions().timeZone} (from DSH_ANDROID_TZ)`)
+    }
+  } catch {
+    note(`DSH_ANDROID_TZ=${JSON.stringify(wantZone)} is not a known time zone; using ${Intl.DateTimeFormat().resolvedOptions().timeZone}`)
+  }
+}
 const tmp = env.TMPDIR
 const gated = env.DSH_ANDROID_ENV_FORCE === '1' || (tmp !== undefined && tmp !== '' && os.tmpdir() !== tmp.replace(/(.)\/$/, '$1'))
 
@@ -32,7 +53,7 @@ if (gated) {
       const r = require('node:module').enableCompileCache(env.NODE_COMPILE_CACHE)
       if (r && r.status !== undefined) restored.push('NODE_COMPILE_CACHE')
     } catch (error) {
-      process.stderr.write(`android-env: compile cache unavailable: ${error && error.message}\n`)
+      note(`compile cache unavailable: ${error && error.message}`)
     }
   }
   if (env.NODE_EXTRA_CA_CERTS) {
@@ -45,8 +66,8 @@ if (gated) {
         restored.push(`NODE_EXTRA_CA_CERTS(${extra.length})`)
       }
     } catch (error) {
-      process.stderr.write(`android-env: extra CA certificates not loaded: ${error && error.message}\n`)
+      note(`extra CA certificates not loaded: ${error && error.message}`)
     }
   }
-  process.stderr.write(`android-env: Node ignores the environment (AT_SECURE); restored ${restored.join(', ') || 'nothing'}\n`)
+  note(`Node ignores the environment (AT_SECURE); restored ${restored.join(', ') || 'nothing'}`)
 }

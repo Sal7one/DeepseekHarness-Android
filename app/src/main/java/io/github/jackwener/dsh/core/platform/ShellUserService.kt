@@ -22,10 +22,21 @@ class ShellUserService : IShellService.Stub() {
 
     override fun exec(cmd: String, timeoutMs: Long): String {
         val p = ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
+        // Read on a separate thread: readText() blocks until stdout closes, so a hung command would
+        // never reach waitFor/destroy and would hold a Shizuku binder thread for ever.
+        val out = StringBuilder()
+        val reader = Thread {
+            runCatching {
+                p.inputStream.bufferedReader().use { r ->
+                    val buf = CharArray(8192)
+                    while (true) { val n = r.read(buf); if (n < 0) break; synchronized(out) { if (out.length < 64_000) out.append(buf, 0, minOf(n, 64_000 - out.length)) } }
+                }
+            }
+        }.apply { isDaemon = true; start() }
         val done = p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!done) p.destroyForcibly()
-        return "${if (done) p.exitValue() else 124}\n${out.take(64_000)}"
+        reader.join(if (done) 2_000 else 500)
+        return "${if (done) p.exitValue() else 124}\n${synchronized(out) { out.toString() }}"
     }
 
     @SuppressLint("WrongConstant")

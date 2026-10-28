@@ -68,7 +68,8 @@ fun SessionDrawer(
     onNew: () -> Unit,
     onOpen: (String) -> Unit,
     onAutomation: () -> Unit,
-    onSettings: () -> Unit,
+    /** Opens Settings, optionally at a section (SettingsSection name). */
+    onSettings: (String?) -> Unit,
     onClose: () -> Unit,
     onRename: (String, String) -> Unit,
     onPin: (String, Boolean) -> Unit,
@@ -98,11 +99,14 @@ fun SessionDrawer(
             Text(stringResource(R.string.new_session), style = DshType.s14, color = c.labelPrimary)
         }
         PanelEntry(R.drawable.dsw_clock_outline, stringResource(R.string.automation), onAutomation)
-        Row(Modifier.fillMaxWidth().height(36.dp).padding(start = 8.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        PanelEntry(R.drawable.dsw_shield_outline, stringResource(R.string.drawer_permissions)) { onSettings("Phone") }
+        Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).padding(start = 8.dp, top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.sessions), Modifier.weight(1f), style = DshType.xs13m, color = c.labelTertiary)
-            IconBtn(R.drawable.dsw_search_outline, { searching = !searching; if (!searching) query = "" }, size = 32.dp, iconSize = 14.dp, tint = c.labelTertiary)
+            IconBtn(R.drawable.dsw_search_outline, { searching = !searching; if (!searching) query = "" }, size = 40.dp, iconSize = 14.dp, tint = c.labelTertiary,
+                contentDescription = stringResource(R.string.search_sessions))
             Box {
-                IconBtn(R.drawable.dsw_sliders_two_outline, { filterOpen = true }, size = 32.dp, iconSize = 14.dp, tint = c.labelTertiary)
+                IconBtn(R.drawable.dsw_sliders_two_outline, { filterOpen = true }, size = 40.dp, iconSize = 14.dp, tint = c.labelTertiary,
+                    contentDescription = stringResource(R.string.filter_sessions))
                 DMenu(filterOpen, { filterOpen = false }) {
                     MenuSectionTitle(stringResource(R.string.filter_sessions))
                     MenuItem(stringResource(R.string.filter_hide_archived), { filter = ArchiveFilter.Hide; filterOpen = false }, selected = filter == ArchiveFilter.Hide)
@@ -112,16 +116,28 @@ fun SessionDrawer(
             }
         }
         if (searching) Box(Modifier.padding(horizontal = 2.dp, vertical = 4.dp)) { DInput(query, { query = it }, placeholder = stringResource(R.string.search_sessions), minHeight = 34.dp) }
+        // dsh: 会话已归档，可 [撤销].
+        var archived by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(archived) { if (archived != null) { delay(5000); archived = null } }
+        val archive: (String, Boolean) -> Unit = { id, on -> onArchive(id, on); archived = if (on) id else null }
         LazyColumn(Modifier.weight(1f)) {
             if (shown.isEmpty()) item { EmptyNote(stringResource(if (query.isBlank()) R.string.no_sessions else R.string.no_matching_sessions)) }
             items(shown, key = { it.id }) { s ->
-                SessionRow(s, status[s.id] ?: RowStatus.Idle, s.id == currentId, now, { onOpen(s.id) }, onRename, onPin, onArchive, onDelete)
+                SessionRow(s, status[s.id] ?: RowStatus.Idle, s.id == currentId, now, { onOpen(s.id) }, onRename, onPin, archive, onDelete)
+            }
+        }
+        archived?.let { id ->
+            Row(Modifier.padding(vertical = 4.dp).fillMaxWidth().heightIn(min = 44.dp).clip(Radius.md).background(c.toastBg).padding(start = 12.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.session_archived), Modifier.weight(1f), style = DshType.xs13, color = androidx.compose.ui.graphics.Color.White)
+                Text(stringResource(R.string.undo), Modifier.clip(Radius.sm).pressable({ onArchive(id, false); archived = null }, Radius.sm).padding(horizontal = 12.dp, vertical = 10.dp),
+                    style = DshType.xs13m, color = c.link)
             }
         }
         // dsh sidebar footer: the account launcher (avatar + name, or 更多 before sign-in) owns 设置.
         val account = io.github.jackwener.dsh.feature.account.LocalAccount.current
-        if (account != null) Box(Modifier.padding(top = 4.dp)) { io.github.jackwener.dsh.feature.account.DrawerAccountRow(account, onSettings) }
-        else PanelEntry(R.drawable.dsw_settings_outline, stringResource(R.string.settings), onSettings)
+        if (account != null) Box(Modifier.padding(top = 4.dp)) { io.github.jackwener.dsh.feature.account.DrawerAccountRow(account) { onSettings(null) } }
+        else PanelEntry(R.drawable.dsw_settings_outline, stringResource(R.string.settings)) { onSettings(null) }
     }
 }
 
@@ -146,8 +162,8 @@ private fun SessionRow(
     var renaming by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     Box {
-        Row(Modifier.fillMaxWidth().height(40.dp).clip(Radius.md).background(if (selected) c.sidebarActive else androidx.compose.ui.graphics.Color.Transparent)
-            .pressable(onClick, Radius.md, onLongClick = { menu = true }).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clip(Radius.md).background(if (selected) c.sidebarActive else androidx.compose.ui.graphics.Color.Transparent)
+            .pressable(onClick, Radius.md, onLongClick = { menu = true }).padding(start = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
                 when {
                     st == RowStatus.Approval -> Box(Modifier.size(6.dp).clip(CircleShape).background(c.warn))
@@ -166,7 +182,10 @@ private fun SessionRow(
                 RowStatus.Question -> stringResource(R.string.row_answer)
                 else -> Fmt.relative(context, s.updatedAt, now)
             }
-            Text(trailing, style = DshType.tiny10, color = if (st == RowStatus.Approval) c.warnLabel else c.labelTertiary)
+            Text(trailing, style = DshType.tiny10, color = if (st == RowStatus.Approval) c.warnLabel else c.labelTertiary, maxLines = 1)
+            // Explicit "…" (spec §1.2): rename / pin / archive / delete are not long-press-only.
+            IconBtn(R.drawable.dsw_ellipsis_outline, { menu = true }, size = 36.dp, iconSize = 14.dp, tint = c.labelTertiary,
+                contentDescription = stringResource(R.string.more_actions))
         }
         DMenu(menu, { menu = false }) {
             MenuItem(stringResource(if (s.pinned) R.string.unpin_session else R.string.pin_session), { menu = false; onPin(s.id, !s.pinned) }, R.drawable.dsw_pin_outline)

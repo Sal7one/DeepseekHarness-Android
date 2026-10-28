@@ -24,6 +24,10 @@ object Browser {
             .setShareState(CustomTabsIntent.SHARE_STATE_OFF)
             .build()
         if (context !is Activity) tab.intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // Pin a browser that really implements Custom Tabs. Many OEM default browsers don't; the
+        // page then opens as a full browser task whose Back walks to the browser's home page
+        // instead of returning to DSH.
+        androidx.browser.customtabs.CustomTabsClient.getPackageName(context, null)?.let { tab.intent.setPackage(it) }
         runCatching { tab.launchUrl(context, uri) }.onFailure {
             Log.w("Browser", "custom tab unavailable, falling back to VIEW", it)
             runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }

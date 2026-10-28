@@ -22,12 +22,20 @@ const RISKS = new Set(['read', 'write', 'sensitive', 'dangerous'])
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/
 const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 const LIST_TIMEOUT_MS = 30_000
+// Timeouts (docs/ENGINE-CONTRACT.md §3.1): the app's ToolDescriptor.timeoutMs is the single source of
+// truth. The app answers (or gives up waiting for the user) a few seconds before it; the plugin's own
+// limits sit slightly after it so the app's clearer result normally wins. On a timeout or an aborted
+// turn the plugin sends `capability/cancel` so the app cancels the call instead of acting later.
+export const DEFAULT_TIMEOUT_MS = 300_000
+export const UNLOCK_TIMEOUT_MS = 900_000
+const BRIDGE_GRACE_MS = 10_000
+const TOOL_GRACE_MS = 15_000
 
 const RISK_NOTE = {
   read: 'read-only; runs without asking',
   write: 'changes device state; the user is asked to approve each call',
   sensitive: 'reads private data; the user is asked to approve each call',
-  dangerous: 'destructive or irreversible; the user must approve each call with biometric confirmation',
+  dangerous: 'destructive or irreversible; the user must approve every single call, even in full-access mode',
 }
 
 // SDK mode reserves stdout for JSON-RPC; plugin diagnostics go to stderr (the app logs it).
@@ -38,7 +46,7 @@ function log(_ctx, level, message) {
 /** Validate one untrusted ToolDescriptor; returns a normalized copy or a reason string. */
 export function normalizeDescriptor(raw) {
   if (raw === null || typeof raw !== 'object') return 'descriptor is not an object'
-  const { name: toolName, group, description, inputSchema, risk, needsUnlock } = raw
+  const { name: toolName, group, description, inputSchema, risk, needsUnlock, timeoutMs } = raw
   if (typeof toolName !== 'string' || !TOOL_NAME.test(toolName)) return `invalid tool name ${JSON.stringify(toolName)}`
   if (!RISKS.has(risk)) return `tool ${toolName}: invalid risk ${JSON.stringify(risk)}`
   if (typeof description !== 'string' || description.trim() === '') return `tool ${toolName}: missing description`
@@ -54,13 +62,16 @@ export function normalizeDescriptor(raw) {
     inputSchema: structuredClone(schema),
     risk,
     needsUnlock: needsUnlock === true,
+    timeoutMs: typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? Math.round(timeoutMs)
+      : needsUnlock === true ? UNLOCK_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
   }
 }
 
 /** Model-facing description: the app's text plus a one-line policy footer. */
 export function toolDescription(d) {
   const parts = [`group: ${d.group}`, `risk: ${d.risk} (${RISK_NOTE[d.risk]})`]
-  if (d.needsUnlock) parts.push('needs the phone unlocked; if locked, the call waits until the user unlocks')
+  if (d.needsUnlock) parts.push(`needs the phone unlocked; if locked, the call waits up to ${Math.round((d.timeoutMs ?? UNLOCK_TIMEOUT_MS) / 60_000)} min for the user to unlock, then returns waiting_for_user and does nothing`)
   return `${d.description}\n\n[Android device tool — ${parts.join('; ')}]`
 }
 
@@ -126,8 +137,6 @@ async function toDshContent(ctx, exec, content) {
 }
 
 export function apply(ctx, config = {}) {
-  const invokeTimeoutMs = Number(config.invokeTimeoutMs ?? 120_000)
-  const unlockTimeoutMs = Number(config.unlockTimeoutMs ?? 900_000)
   const rawFd = config.fd ?? process.env.DSH_BRIDGE_FD
   if (rawFd === undefined || rawFd === '') {
     log(ctx, 'info', 'DSH_BRIDGE_FD is not set; no device tools will be registered')
@@ -170,20 +179,31 @@ export function apply(ctx, config = {}) {
     name: d.name,
     description: toolDescription(d),
     parameters: d.inputSchema,
-    timeoutMs: d.needsUnlock ? unlockTimeoutMs : invokeTimeoutMs,
+    timeoutMs: d.timeoutMs + TOOL_GRACE_MS,
     isConcurrencySafe: () => d.risk === 'read',
     output: {
       schema: {},
       render: (_args, value) => Array.isArray(value?.content) ? value.content : [{ type: 'text', text: JSON.stringify(value) }],
     },
     async execute(args, exec) {
-      const sessionId = appSessionId(ctx, exec.agent)
-      const result = await peer.request('capability/invoke', {
-        sessionId: sessionId ?? '',
-        callId: String(exec.callId),
-        tool: d.name,
-        args: args ?? {},
-      }, { signal: exec.signal, timeoutMs: d.needsUnlock ? unlockTimeoutMs : invokeTimeoutMs })
+      const sessionId = appSessionId(ctx, exec.agent) ?? ''
+      const callId = String(exec.callId)
+      let result
+      try {
+        result = await peer.request('capability/invoke', {
+          sessionId,
+          callId,
+          tool: d.name,
+          args: args ?? {},
+          timeoutMs: d.timeoutMs,
+        }, { signal: exec.signal, timeoutMs: d.timeoutMs + BRIDGE_GRACE_MS })
+      } catch (error) {
+        // Timed out or aborted (turn stopped, tool deadline): the app must not act on it later.
+        if (error?.code === 'BRIDGE_TIMEOUT' || exec.signal?.aborted) {
+          peer.notify('capability/cancel', { sessionId, callId, reason: error?.code === 'BRIDGE_TIMEOUT' ? 'timeout' : 'aborted' })
+        }
+        throw error
+      }
       if (result === null || typeof result !== 'object') throw new Error(`${d.name}: the app returned an invalid ToolResult`)
       if (result.ok !== true) {
         const code = result.error?.code ?? 'failed'

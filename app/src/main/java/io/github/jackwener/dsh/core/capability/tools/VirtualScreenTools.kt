@@ -30,15 +30,25 @@ class VirtualScreenTools @Inject constructor(
         private set
 
     suspend fun capture(displayId: Int): ToolResult {
+        if (context.getSystemService(android.hardware.display.DisplayManager::class.java).getDisplay(displayId) == null) {
+            if (activeDisplay == displayId) activeDisplay = null
+            throw InvalidArgsException("Virtual screen $displayId no longer exists (Shizuku restarted?); call vscreen_start again")
+        }
         val jpeg = shizuku.service().captureDisplay(displayId) ?: throw IllegalStateException("No frame yet; wait and retry")
-        return ToolResult.image("image/jpeg", Base64.encodeToString(jpeg, Base64.NO_WRAP))
+        return ToolResult.image("image/jpeg", Base64.encodeToString(jpeg, Base64.NO_WRAP), "virtual screen $displayId (screen pixels)")
     }
 
     override val tools = listOf(
         object : Tool("vscreen_start", ToolGroup.VScreen, Risk.write, false,
-            "Create the agent's own invisible screen (needs Shizuku). Returns displayId; pass it to app_launch/screen_* tools so work happens off the user's screen.", {}, ShellUse.Required) {
+            "Create the agent's own invisible screen (needs Shizuku). Returns displayId; pass it to app_launch/screen_* tools so work happens off the user's screen. " +
+                "screen_key there supports back/home/enter/delete only (through Shizuku).", {}, ShellUse.Required) {
             override suspend fun invoke(args: JsonObject, call: CallContext): ToolResult {
-                activeDisplay?.let { return ToolResult.text("Virtual screen already running: displayId=$it") }
+                // The id goes stale when the Shizuku service died (Shizuku restart, reboot): only reuse a live display.
+                activeDisplay?.let { id ->
+                    if (context.getSystemService(android.hardware.display.DisplayManager::class.java).getDisplay(id) != null)
+                        return ToolResult.text("Virtual screen already running: displayId=$id")
+                    activeDisplay = null
+                }
                 val m = context.resources.displayMetrics
                 val id = shizuku.service().createDisplay(m.widthPixels, m.heightPixels, m.densityDpi)
                 if (id < 0) throw IllegalStateException("Could not create a virtual display on this device")

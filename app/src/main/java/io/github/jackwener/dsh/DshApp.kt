@@ -7,6 +7,7 @@ import io.github.jackwener.dsh.core.platform.Notifications
 import io.github.jackwener.dsh.core.trigger.TriggerEvents
 import io.github.jackwener.dsh.core.trigger.TriggerHub
 import io.github.jackwener.dsh.service.FloatingBallService
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,10 +26,12 @@ class DshApp : Application() {
         Notifications.createChannels(this)
         importDebugKey()
         TriggerEvents.init(this)
-        CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+        // Startup work must never crash the process (a bad stored rule used to kill every app start).
+        val guard = CoroutineExceptionHandler { _, e -> android.util.Log.e("DshApp", "startup task failed", e) }
+        CoroutineScope(SupervisorJob() + Dispatchers.Default + guard).launch {
             // Import :engine crash records (ApplicationExitInfo / tombstones) from earlier runs.
-            io.github.jackwener.dsh.core.engine.EngineDiagnostics.collectExitInfo(this@DshApp)
-            triggers.get().sync()
+            runCatching { io.github.jackwener.dsh.core.engine.EngineDiagnostics.collectExitInfo(this@DshApp) }
+            runCatching { triggers.get().sync() }.onFailure { android.util.Log.e("DshApp", "automation sync failed", it) }
             if (settings.get().current().floatingBall) runCatching { FloatingBallService.setEnabled(this@DshApp, true) }
         }
     }

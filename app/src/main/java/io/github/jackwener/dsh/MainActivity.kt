@@ -74,6 +74,8 @@ class MainViewModel @Inject constructor(settings: SettingsRepository, secrets: S
 class MainActivity : ComponentActivity() {
     @Inject lateinit var account: AccountRepository
     private var pendingSession by mutableStateOf<String?>(null)
+    /** Settings section to open (EXTRA_SECTION, e.g. the quick panel's 登录 / 添加 API Key / 打开自检). */
+    private var pendingSection by mutableStateOf<String?>(null)
     /** The sign-in dialog's 添加 API Key while onboarding expands the key card in place. */
     private var onboardingKey by mutableStateOf(false)
 
@@ -81,7 +83,11 @@ class MainActivity : ComponentActivity() {
         val splash = installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        pendingSession = intent.getStringExtra(EXTRA_SESSION)
+        // Only for a fresh launch: after recreation (rotation, theme) the user may have moved on.
+        if (savedInstanceState == null) {
+            pendingSession = intent.getStringExtra(EXTRA_SESSION)
+            pendingSection = intent.getStringExtra(EXTRA_SECTION)
+        }
         handleAppLink(intent)
         setContent {
             val vm: MainViewModel = hiltViewModel()
@@ -108,7 +114,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         pendingSession = intent.getStringExtra(EXTRA_SESSION)
+        pendingSection = intent.getStringExtra(EXTRA_SECTION)
         handleAppLink(intent)
     }
 
@@ -125,6 +133,12 @@ class MainActivity : ComponentActivity() {
         val accountState by account.state.collectAsStateWithLifecycle()
         LaunchedEffect(pendingSession) {
             pendingSession?.let { id -> home.open(id); nav.popBackStack("home", inclusive = false); pendingSession = null }
+        }
+        LaunchedEffect(pendingSection) {
+            pendingSection?.let { sec ->
+                pendingSection = null
+                if (nav.currentDestination?.route != "onboarding") nav.navigate("settings?section=$sec") { launchSingleTop = true }
+            }
         }
         val start = remember { if (hasCredentials) "home" else "onboarding" }
         if (accountState.loginVisible) SignInDialog(account, onUseApiKey = {
@@ -161,5 +175,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    companion object { const val EXTRA_SESSION = "session" }
+    companion object {
+        const val EXTRA_SESSION = "session"
+        /** A SettingsSection name to open on arrival. */
+        const val EXTRA_SECTION = "settings_section"
+    }
 }

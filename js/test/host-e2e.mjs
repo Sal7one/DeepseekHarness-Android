@@ -8,7 +8,13 @@
 //   4. phase B: a fake capability bridge on fd 3 (socketpair) serving 3 tools, a
 //      real DeepSeek prompt that reads (file_list, no approval) and writes
 //      (file_write → approval/request → allowed-once → capability/invoke), then a
-//      shell prompt whose `rm -rf /sdcard` must be hard-blocked with no approval.
+//      shell prompt whose `rm -rf /sdcard` must be hard-blocked with no approval,
+//   5. phase C/D: account login (fake Platform / real Platform up to the authorize URL),
+//   6. phase E: faked Android (process.platform = os.platform() = 'android', os.tmpdir()
+//      ignoring TMPDIR like AT_SECURE) so the android branches of the patches run, with the
+//      real model: time context in the device zone, read-only shell without approval, the
+//      仅可查看 preset refusing a write up front, a sensitive read asked once per conversation,
+//      HOME writes without approval, and an unattended run whose question is auto-answered.
 //
 // Usage: node js/test/host-e2e.mjs [engine.zip] [native-dir]
 // The API key is read from ~/.config/kevin-secrets/deepseek_api_key (never printed).
@@ -27,8 +33,8 @@ const root = join(AGENT, 'toolchains/tmp', `host-e2e-${Date.now()}`)
 const engineDir = process.env.E2E_ENGINE_DIR ? resolve(process.env.E2E_ENGINE_DIR) : join(root, 'engine')
 const logFile = join(root, 'e2e.log')
 const MODEL = process.env.E2E_MODEL ?? 'deepseek-flash'
-// E2E_PHASES=A,B,C,D selects phases (default all); E2E_ENGINE_DIR reuses an extracted tree.
-const PHASES = new Set((process.env.E2E_PHASES ?? 'A,B,C,D').split(','))
+// E2E_PHASES=A,B,C,D,E selects phases (default all); E2E_ENGINE_DIR reuses an extracted tree.
+const PHASES = new Set((process.env.E2E_PHASES ?? 'A,B,C,D,E').split(','))
 
 mkdirSync(root, { recursive: true })
 const t0 = Date.now()
@@ -124,7 +130,7 @@ function rpcPeer(readable, writable, name, onRequest, onNotify) {
   }
 }
 
-function startEngine(env, extraFd, extraArgs = []) {
+function startEngine(env, extraFd, extraArgs = [], preloads = []) {
   const stdio = extraFd ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe']
   if (extraFd) env.DSH_BRIDGE_FD = '3'
   // Same argv as EngineService (EngineRuntimeEnv.nodeArgv): --expose-internals replaces the
@@ -134,7 +140,7 @@ function startEngine(env, extraFd, extraArgs = []) {
   // falls back to an unwritable /tmp, so the checks below prove the preload restores it.
   const atSecure = join(root, 'simulate-at-secure.cjs')
   writeFileSync(atSecure, "const os = require('node:os'); os.tmpdir = () => '/nonexistent-tmp'; require('node:module').syncBuiltinESMExports()\n")
-  const pre = existsSync(preload) ? ['--require', atSecure, '--require', preload] : []
+  const pre = [...preloads.flatMap(p => ['--require', p]), ...(existsSync(preload) ? ['--require', atSecure, '--require', preload] : [])]
   const child = spawn(process.execPath, ['--expose-internals', '--max-old-space-size=768', ...pre, bin, '--profile', 'android', ...extraArgs], { cwd: '/', env, stdio })
   let stderr = ''
   child.stderr.setEncoding('utf8')
@@ -169,8 +175,11 @@ if (PHASES.has('A')) {
   const notes = (eng.stderr().match(/DSH_BRIDGE_FD is not set/g) ?? []).length
   check('A: missing bridge logged exactly once', notes === 1, `count=${notes}`)
   check('A: no fatal startup error', !/fatal|StartupError|Cannot find module/i.test(eng.stderr()))
+  check('A: every plugin activated', !/did not activate|failed to (load|activate)/i.test(eng.stderr()), (eng.stderr().match(/.*did not activate.*/) ?? [''])[0].slice(0, 300))
   check('A: android-env preload restored TMPDIR', /android-env: .*restored TMPDIR/.test(eng.stderr()))
-  check('A: spill-local activated (no tmpdir failure)', !/spill-local|dsh-spill-XXXXXX|EACCES/.test(eng.stderr()))
+  // The mirrored dsh warning "spill-local: skipped unsafe root" is host-specific (this agent's tree is group-writable).
+  const spillErrors = eng.stderr().split('\n').filter(l => /spill-local|dsh-spill-XXXXXX|EACCES/.test(l) && !/skipped unsafe root/.test(l))
+  check('A: spill-local activated (no tmpdir failure)', spillErrors.length === 0, (spillErrors[0] ?? '').slice(0, 200))
   check('A: spill root created under TMPDIR', readdirSync(env.TMPDIR).some(n => n.startsWith('dsh-spill-')), readdirSync(env.TMPDIR).join(','))
 }
 
@@ -532,6 +541,107 @@ if (PHASES.has('D')) {
     check('D: run completed', false, error.stack ?? error.message)
   }
   await withTimeout(eng.exited, 15_000, 'exit D').catch(() => eng.child.kill('SIGKILL'))
+}
+
+// ── phase E: faked Android platform + real model ─────────────────────────────
+if (!PHASES.has('E')) {
+  // skipped
+} else if (!existsSync(keyFile)) {
+  check('E: DeepSeek API key available', false, keyFile)
+} else {
+  log('phase E: faked android platform + DeepSeek', MODEL)
+  const dshHome = join(root, 'e-dsh-home'); const home = join(root, 'e-home')
+  mkdirSync(home, { recursive: true })
+  const env = baseEnv(dshHome, home)
+  env.DEEPSEEK_API_KEY = readFileSync(keyFile, 'utf8').trim()
+  env.DSH_ANDROID_TZ = 'Asia/Shanghai'
+  env.DSH_ANDROID_LOCALE = 'zh-CN'
+  env.DSH_BASH_SHELL = '/bin/sh' // the host has no /system/bin/sh (patch 04 picks it on android)
+  const fake = join(root, 'fake-android.cjs')
+  writeFileSync(fake, "Object.defineProperty(process, 'platform', { value: 'android' }); const os = require('node:os'); os.platform = () => 'android'; require('node:module').syncBuiltinESMExports()\n")
+  const eng = startEngine(env, true, [], [fake])
+  const tools = [
+    { name: 'file_write', group: 'files', risk: 'write', needsUnlock: false,
+      description: 'Create or overwrite a text file in the phone\'s shared storage. Paths are relative to /sdcard.',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+    { name: 'contacts_search', group: 'comms', risk: 'sensitive', needsUnlock: false,
+      description: 'Search the phone\'s contacts by name; returns names and numbers.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+    { name: 'alarm_set', group: 'system', risk: 'write', needsUnlock: true,
+      description: 'Set an alarm in the clock app.', inputSchema: { type: 'object', properties: { hour: { type: 'integer' }, minute: { type: 'integer' } } } },
+    { name: 'volume_set', group: 'system', risk: 'write', needsUnlock: false,
+      description: 'Set a volume stream level.', inputSchema: { type: 'object', properties: { level: { type: 'integer' } } } },
+  ]
+  const invokes = []
+  rpcPeer(eng.child.stdio[3], eng.child.stdio[3], 'bridge-e', async (method, params) => {
+    if (method === 'capability/list') return { tools }
+    if (method === 'capability/invoke') {
+      invokes.push(params)
+      if (params.tool === 'contacts_search') return { ok: true, content: [{ type: 'text', text: `${params.args?.query}: +86 138 0000 000${invokes.length}` }] }
+      return { ok: true, content: [{ type: 'text', text: `ok (${params.tool})` }] }
+    }
+    throw new Error(`unexpected ${method}`)
+  })
+  const approvals = []; const questions = []; const events = []
+  const sdk = rpcPeer(eng.child.stdout, eng.child.stdin, 'sdk-e', (method, params) => {
+    if (method === 'approval/request') { approvals.push(params); detail(`[e] approval ${params.toolName} ${String(params.reason).slice(0, 160)}`); return { outcome: 'allowed-once' } }
+    if (method === 'user-question/ask') { questions.push(params); return { answers: params.questions.map(q => ({ id: q.id, selected: [], custom: 'Blue.' })) } }
+    throw new Error(`unexpected server request ${method}`)
+  }, (method, params) => {
+    if (method !== 'session.event') return
+    events.push(params)
+    const e = params.event
+    if (['tool/call', 'tool/result', 'user/message', 'turn/end'].includes(e?.type)) detail(`[e event] ${params.sessionId.slice(0, 14)} ${e.type} ${JSON.stringify(e.data).slice(0, 500)}`)
+  })
+  const of = (sid, type) => events.filter(e => e.sessionId === sid && e.event?.type === type).map(e => e.event)
+  const calls = (sid, name) => of(sid, 'tool/call').filter(e => e.data?.name === name)
+  const results = sid => of(sid, 'tool/result').map(e => JSON.stringify(e.data))
+  const run = async (sid, text, ms = 240_000) => {
+    await sdk.request('session/prompt', { sessionId: sid, contentBlocks: [{ type: 'text', text }] })
+    await withTimeout(sdk.request('session/wait', { sessionId: sid }), ms, `prompt ${sid}`)
+  }
+  try {
+    await withTimeout(sdk.request('initialize', { cwd: home, provider: 'deepseek-official', model: MODEL, approvalRequests: true, capabilities: { userQuestions: true } }), 60_000, 'initialize E')
+    await waitFor(() => /device tools: 4 registered/.test(eng.stderr()), 15_000, 'device tools').catch(() => {})
+    check('E: boots as android with every plugin active and 4 device tools', /device tools: 4 registered/.test(eng.stderr()) && !/did not activate|StartupError/.test(eng.stderr()))
+    check('E: android-env applied DSH_ANDROID_TZ', /android-env: time zone Asia\/Shanghai/.test(eng.stderr()))
+
+    // 1. time context + read-only shell (no approval) + dsh warnings mirrored to stderr
+    const s1 = `e-${Date.now()}`
+    await sdk.request('android/session/permission', { sessionId: s1, preset: 'workspace-write' })
+    await run(s1, 'Run `ls -la` and `getprop ro.product.model 2>/dev/null; date +%Y` in the shell (one bash call each is fine), then use the write tool to save the word hello to the file notes.txt in your working directory, and finally tell me today\'s date and weekday in one sentence.')
+    const timeMsg = of(s1, 'user/message').map(e => JSON.stringify(e.data)).find(t => t.includes('"time-context"'))
+    check('E: time context reading in the device zone reaches the model', timeMsg?.includes('[Asia/Shanghai]') && timeMsg.includes('time zone for this request: Asia/Shanghai'), (timeMsg ?? '').slice(0, 200))
+    check('E: read-only bash ran without approval', calls(s1, 'bash').length > 0 && !approvals.some(a => a.sessionId === s1 && a.toolName === 'bash'), `bash calls=${calls(s1, 'bash').length}`)
+    check('E: write inside HOME ran without approval', existsSync(join(home, 'notes.txt')) && !approvals.some(a => a.sessionId === s1 && a.toolName === 'write'), `approvals=${approvals.filter(a => a.sessionId === s1).map(a => a.toolName)}`)
+    check('E: dsh runtime warnings reach stderr (engine.log)', /\[dsh:[^\]]+\] (warn|error): /.test(eng.stderr()), (eng.stderr().match(/\[dsh:[^\]]+\] (warn|error): .*/) ?? [''])[0].slice(0, 160))
+
+    // 2. 仅可查看: a device write is refused up front with the mode explained
+    const s2 = `e2-${Date.now()}`
+    await sdk.request('android/session/permission', { sessionId: s2, preset: 'read-only' })
+    await run(s2, 'Use the file_write tool to save "hi" to Download/hi.txt. If it is refused, tell me why in one sentence.')
+    check('E: 仅可查看 refuses the write without an approval round trip', calls(s2, 'file_write').length > 0 && !approvals.some(a => a.sessionId === s2) && !invokes.some(i => i.sessionId === s2),
+      `calls=${calls(s2, 'file_write').length} approvals=${approvals.filter(a => a.sessionId === s2).length}`)
+    check('E: the refusal names the read-only permission mode', results(s2).some(t => t.includes('仅可查看') && t.includes('permission mode')))
+
+    // 3. sensitive read: asked once per conversation
+    const s3 = `e3-${Date.now()}`
+    await run(s3, 'Look up the contacts "Alice" and then "Bob" with contacts_search (two separate calls, one after the other), then list both numbers.')
+    const contactCalls = invokes.filter(i => i.sessionId === s3 && i.tool === 'contacts_search').length
+    const contactAsks = approvals.filter(a => a.sessionId === s3 && a.toolName === 'contacts_search').length
+    check('E: sensitive read asks once, later calls in the conversation run directly', contactCalls >= 2 && contactAsks === 1, `invokes=${contactCalls} approvals=${contactAsks}`)
+
+    // 4. unattended run: told so, and its question is answered automatically
+    const s4 = `auto_7_${Date.now()}`
+    await run(s4, 'Use the ask_user_question tool once to ask which colour I prefer (red or blue), then reply with the answer you got.')
+    const asked = calls(s4, 'ask_user_question').length
+    check('E: unattended question auto-answered, never sent to the app', asked > 0 && questions.length === 0 && results(s4).some(t => t.includes('Nobody is available')), `asked=${asked} forwarded=${questions.length}`)
+    await sdk.request('shutdown', {}).catch(() => {})
+  } catch (error) {
+    check('E: run completed', false, error.stack ?? error.message)
+  }
+  await withTimeout(eng.exited, 15_000, 'exit E').catch(() => eng.child.kill('SIGKILL'))
+  check('E: no fatal error on stderr', !/fatal uncaught|StartupError|unhandled/i.test(eng.stderr()))
 }
 
 const failed = checks.filter(c => !c.ok)

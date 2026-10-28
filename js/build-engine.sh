@@ -68,16 +68,34 @@ rm -rf "${HOST_NATIVE:?}"
 if [[ "$(uname -s)-$(uname -m)" == "Linux-aarch64" ]]; then
   mkdir -p "$HOST_NATIVE"
   cp "$NM/@deepseek-ai/node-addon-system-linux-arm64/bin/glibc/system.node" "$HOST_NATIVE/libdsh_flock.so"
-  cp "$NM/node-pty/prebuilds/linux-arm64/pty.node" "$HOST_NATIVE/libdsh_pty.so"
   log "host test bindings -> $HOST_NATIVE"
 fi
 
 # ── 5. patches ───────────────────────────────────────────────────────────────
+# Every target must exist. A content-hashed chunk name (`name-XXXXXXXX.js`, renamed by any dsh
+# rebuild) is resolved to the single current chunk with the same stem; anything else fails loudly.
+PATCH_TMP="$WORK_DIR/patches"
+rm -rf "${PATCH_TMP:?}"; mkdir -p "$PATCH_TMP"
 for p in "$JS_DIR"/patches/*.patch; do
-  log "patch $(basename "$p")"
-  patch -p1 -d "$NM" --forward --batch --no-backup-if-mismatch --dry-run --silent < "$p" >/dev/null \
-    || die "patch $(basename "$p") does not apply cleanly"
-  patch -p1 -d "$NM" --forward --batch --no-backup-if-mismatch --silent < "$p"
+  name="$(basename "$p")"
+  log "patch $name"
+  cp "$p" "$PATCH_TMP/$name"
+  while IFS= read -r target; do
+    [[ -f "$NM/$target" ]] && continue
+    stem="${target%-*.js}"
+    if [[ "$stem" != "$target" && "$target" =~ -[A-Za-z0-9_]{8}\.js$ ]]; then
+      mapfile -t found < <(cd "$NM" && compgen -G "$stem-*.js" || true)
+      if [[ ${#found[@]} -eq 1 ]]; then
+        log "  $target -> ${found[0]} (content-hashed chunk renamed)"
+        sed -i "s#^\(---\|+++\) \([ab]\)/$target#\1 \2/${found[0]}#" "$PATCH_TMP/$name"
+        continue
+      fi
+    fi
+    die "patch $name targets $target, which this dsh $DSH_VERSION tree does not have (upgrade? rebase or drop the patch)"
+  done < <(sed -n 's#^+++ b/\([^[:space:]]*\).*#\1#p' "$p")
+  patch -p1 -d "$NM" --forward --batch --no-backup-if-mismatch --dry-run --silent < "$PATCH_TMP/$name" >/dev/null \
+    || die "patch $name does not apply cleanly to dsh $DSH_VERSION"
+  patch -p1 -d "$NM" --forward --batch --no-backup-if-mismatch --silent < "$PATCH_TMP/$name"
 done
 find "$NM" \( -name '*.rej' -o -name '*.orig' \) -print -quit | grep -q . && die "patch left .rej/.orig files"
 
@@ -87,6 +105,11 @@ before_kb=$(du -sk "$NM" | cut -f1)
 rm_pkg() { for d in "$@"; do [[ -e "$NM/$d" ]] && rm -rf "${NM:?}/$d"; done; return 0; }
 # Big optional payloads the android profile never loads.
 rm_pkg @deepseek-ai/libreoffice-kit-wasm
+# The profile disables `llm-pi-ai` (DeepSeek-only product): pi-ai and the provider SDKs only it
+# reaches (openai, @anthropic-ai, @google/genai, @aws-sdk, @smithy, …; computed from the lockfile).
+mapfile -t pi_only < <(node "$JS_DIR/scripts/unreachable.mjs" "$STAGE/package-lock.json" @earendil-works/pi-ai)
+for key in "${pi_only[@]}"; do [[ -e "$STAGE/$key" ]] && rm -rf "${STAGE:?}/$key"; done
+log "pruned ${#pi_only[@]} packages only reachable through @earendil-works/pi-ai"
 # Browser client UI and the experimental inspector (Web/desktop surfaces only; boot verified without them).
 for d in "$NM"/@deepseek-ai/dsh-client-ui-*; do rm -rf "$d"; done
 rm_pkg @deepseek-ai/dsh-web-frontend @deepseek-ai/dsh-experimental-inspector
@@ -123,12 +146,15 @@ grep -q 'libdsh_flock.so' "$NM/@deepseek-ai/node-addon-system/lib/flock.js" || d
 grep -q '"@dsh-android/bundle-android"' "$NM/@deepseek-ai/dsh-app-boot/lib/index.js" || die "profile template patch missing"
 grep -q 'sdkExtensions' "$NM/@deepseek-ai/dsh-sdk-jsonrpc-server/lib/index.js" || die "SDK extension patch missing"
 grep -q 'expose-internals' "$NM/node-addon-require-builtin/lib/index.js" || die "require-builtin patch missing"
+grep -q 'promptTimeZone' "$NM/@deepseek-ai/dsh-sdk-jsonrpc-server/lib/index.js" || die "SDK prompt time-zone patch missing"
+[[ -f "$NM/@deepseek-ai/dsh-time-context/package.json" && -f "$NM/@deepseek-ai/dsh-tool-ask-user/package.json" ]] || die "time-context / ask-user packages missing"
+[[ ! -e "$NM/@earendil-works/pi-ai" && ! -e "$NM/openai" ]] || die "provider SDK prune failed"
 [[ -f "$NM/@img/sharp-wasm32/package.json" ]] || die "sharp wasm build missing"
 log "no symlinks; entry point and patches verified"
 
 # ── 8. version, zip, digest, report ──────────────────────────────────────────
 INPUT_HASH=$( (cd "$JS_DIR" && cat engine/package-lock.json patches/*.patch \
-  packages/bundle-android/cordis.patch.yml packages/*/package.json packages/plugin-*/*.js scripts/*.mjs build-engine.sh) | sha256sum | cut -c1-10)
+  packages/bundle-android/cordis.patch.yml packages/bundle-android/android-env.cjs packages/*/package.json packages/plugin-*/*.js scripts/*.mjs build-engine.sh) | sha256sum | cut -c1-10)
 ENGINE_VERSION="${DSH_VERSION}-a${INPUT_HASH}"
 printf '%s\n' "$ENGINE_VERSION" > "$STAGE/engine-version.txt"
 printf '%s\n' "$ENGINE_VERSION" > "$OUT_DIR/engine-version.txt"
@@ -149,7 +175,7 @@ python3 -I "$JS_DIR/scripts/make-zip.py" "$STAGE" "$OUT_DIR/engine.zip"
   echo "sha256: $(cut -d' ' -f1 "$OUT_DIR/engine.sha256")"
   echo
   echo "largest packages (KiB):"
-  (cd "$NM" && du -sk -- [!@]* @*/* 2>/dev/null | sort -rn | head -25)
+  (cd "$NM" && du -sk -- [!@]* @*/* 2>/dev/null | sort -rn | awk "NR<=25")
 } > "$OUT_DIR/size-report.txt"
 cat "$OUT_DIR/size-report.txt" >&2
 log "done: $OUT_DIR/engine.zip"

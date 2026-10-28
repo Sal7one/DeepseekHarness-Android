@@ -2,4 +2,6 @@
 <paths>
     <external-path name="storage" path="." />
     <cache-path name="cache" path="." />
+    <!-- SD cards / USB storage (/storage/XXXX-XXXX) for share_to_app -->
+    <root-path name="volumes" path="storage" />
 </paths>

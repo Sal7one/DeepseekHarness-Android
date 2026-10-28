@@ -64,15 +64,60 @@ data class SessionLive(
     /** Set when this session's run is waiting for the engine process to come up. */
     val startingEngine: Boolean = false,
     val runStartedAt: Long? = null,
+    /**
+     * The card shown in the composer slot: the oldest pending request of each kind. Requests can
+     * overlap (parallel read tools, subagents), so every kind is a FIFO ([approvals], ...) and the
+     * head is mirrored here; always change them through [withPending] / [withoutPending].
+     */
     val approval: PendingApproval? = null,
     val question: PendingQuestion? = null,
     val permission: PendingPermission? = null,
     val takeover: PendingTakeover? = null,
+    val approvals: List<PendingApproval> = emptyList(),
+    val questions: List<PendingQuestion> = emptyList(),
+    val permissions: List<PendingPermission> = emptyList(),
+    val takeovers: List<PendingTakeover> = emptyList(),
     val waitingForUnlock: Boolean = false,
     val queue: List<QueuedMessage> = emptyList(),
+    /** Queued messages handed back to the composer after the run ended without sending them (stop / failure). */
+    val restoredDraft: String? = null,
     val preset: PermissionPreset = PermissionPreset.Ask,
     val exists: Boolean = false,
-)
+) {
+    val hasPendingRequest: Boolean get() = approvals.isNotEmpty() || questions.isNotEmpty() || permissions.isNotEmpty() || takeovers.isNotEmpty()
+
+    /** Appends a pending request of any kind to its FIFO. */
+    fun withPending(request: Any): SessionLive = when (request) {
+        is PendingApproval -> copy(approvals = approvals + request)
+        is PendingQuestion -> copy(questions = questions + request)
+        is PendingPermission -> copy(permissions = permissions + request)
+        is PendingTakeover -> copy(takeovers = takeovers + request)
+        else -> error("not a pending request: $request")
+    }.synced()
+
+    /** Removes the pending request [requestKey] (of whatever kind); the next one, if any, becomes the visible card. */
+    fun withoutPending(requestKey: String): SessionLive = copy(
+        approvals = approvals.filterNot { it.requestKey == requestKey },
+        questions = questions.filterNot { it.requestKey == requestKey },
+        permissions = permissions.filterNot { it.requestKey == requestKey },
+        takeovers = takeovers.filterNot { it.requestKey == requestKey },
+    ).synced()
+
+    fun withoutAnyPending(): SessionLive = copy(approvals = emptyList(), questions = emptyList(), permissions = emptyList(), takeovers = emptyList()).synced()
+
+    /**
+     * The run is over without having sent its queued messages (stop, failure, engine loss): the
+     * session goes idle and the queue moves back into the composer instead of firing later, after
+     * whatever the user sends next.
+     */
+    fun idle(): SessionLive = copy(
+        running = false, startingEngine = false, runStartedAt = null, waitingForUnlock = false, queue = emptyList(),
+        restoredDraft = (listOfNotNull(restoredDraft) + queue.map { it.text }).joinToString("\n\n").ifEmpty { null },
+    )
+
+    private fun synced() = copy(approval = approvals.firstOrNull(), question = questions.firstOrNull(),
+        permission = permissions.firstOrNull(), takeover = takeovers.firstOrNull())
+}
 
 /** What the sidebar status slot shows (dsh StateDot precedence). */
 enum class RowStatus { Approval, Question, Running, Idle }

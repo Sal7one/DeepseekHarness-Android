@@ -36,19 +36,39 @@ fun parseArgs(arguments: String?): JsonObject? = arguments?.let { runCatching { 
 
 // ---- token usage --------------------------------------------------------------------------------
 
-data class Usage(val input: Long = 0, val output: Long = 0, val cacheRead: Long = 0, val reasoning: Long = 0) {
+/**
+ * Token usage. dsh's counts are disjoint ([uncached] input, [cacheRead], [cacheWrite]); [input] is
+ * the whole prompt (dsh token-meter: input + cacheRead + cacheWrite), which is what context
+ * pressure and the per-turn ↑ mean.
+ */
+data class Usage(val uncached: Long = 0, val output: Long = 0, val cacheRead: Long = 0, val reasoning: Long = 0, val cacheWrite: Long = 0) {
+    val input get() = uncached + cacheRead + cacheWrite
     val total get() = input + output
-    operator fun plus(o: Usage) = Usage(input + o.input, output + o.output, cacheRead + o.cacheRead, reasoning + o.reasoning)
+    operator fun plus(o: Usage) = Usage(uncached + o.uncached, output + o.output, cacheRead + o.cacheRead, reasoning + o.reasoning, cacheWrite + o.cacheWrite)
     val isEmpty get() = input == 0L && output == 0L
 
     companion object {
         fun of(u: JsonObject?): Usage? {
             u ?: return null
             fun n(vararg k: String) = k.firstNotNullOfOrNull { u.l(it) } ?: 0L
-            return Usage(n("inputTokens", "input"), n("outputTokens", "output"), n("cacheReadTokens", "cacheRead"), n("reasoningTokens"))
+            return Usage(n("inputTokens", "input"), n("outputTokens", "output"), n("cacheReadTokens", "cacheRead"), n("reasoningTokens"), n("cacheWriteTokens", "cacheWrite"))
         }
     }
 }
+
+/**
+ * Data key under which SessionStore keeps a non-`append` dsh `surfaceOp` (e.g. the tool-result
+ * pruner's `replace`). Such events rewrite what the model sees later; they are not new results.
+ */
+const val SURFACE_OP_KEY = "_surfaceOp"
+
+internal fun LoggedEvent.isReplacement() = data[SURFACE_OP_KEY] != null
+
+/**
+ * Prompts the app itself sends on the user's behalf (e.g. the continuation after an engine crash)
+ * start with this marker; dsh records them as user messages, but they are not shown as the user's.
+ */
+const val APP_PROMPT_PREFIX = "[DSH] "
 
 // ---- conversation projection --------------------------------------------------------------------
 
@@ -141,12 +161,13 @@ object Projector {
             when (e.type) {
                 "turn/start" -> {
                     open()?.let { close(it, e.time, TurnStatus.Stopped) }
+                    // Todo state is session-level in dsh (last write wins), so it carries across turns.
                     turns += TurnB("t${e.seq}", d.i("turn"), e.time)
-                    todos = null
                 }
                 "user/message" -> {
-                    if (d.o("source")?.s("kind") != "user") continue
+                    if (d.o("source")?.s("kind") != "user" || e.isReplacement()) continue
                     val content = d["content"]
+                    if (textOf(content).startsWith(APP_PROMPT_PREFIX)) continue
                     val msg = UserMsg(e.seq, e.time, textOf(content), countOf(content, "image"), countOf(content, "file"))
                     val t = open()
                     if (t != null && t.user == null && t.blocks.isEmpty()) t.user = msg
@@ -166,6 +187,7 @@ object Projector {
                     t.blocks += Block.Tool("k$callId", callId, d.s("name") ?: "?", args, parseArgs(args), ToolState.Running, null, null, null, e.time, null)
                 }
                 "tool/result" -> {
+                    if (e.isReplacement()) continue
                     val msg = d.o("message")
                     val callId = msg?.s("toolCallId") ?: continue
                     val t = turns.lastOrNull { tb -> tb.blocks.any { it is Block.Tool && it.callId == callId } } ?: continue
@@ -278,6 +300,7 @@ object Projector {
                         d.s("arguments"), null, null, d, step = d.i("step"), toolName = d.s("name"))
                 }
                 "tool/result" -> {
+                    if (e.isReplacement()) continue
                     val msg = d.o("message")
                     val callId = msg?.s("toolCallId") ?: continue
                     val t = toolTurn[callId] ?: continue
@@ -312,7 +335,7 @@ object Projector {
                     val callId = d.s("callId") ?: continue
                     childCalls[callId] = TrajRecord("s$callId", RecordKind.Subtool, e.seq, d.s("name") ?: "?", e.time, null, null, RecordStatus.Pending,
                         callId, d.s("arguments"), null, null, d, toolName = d.s("name"))
-                } else if (e.type == "tool/result") {
+                } else if (e.type == "tool/result" && !e.isReplacement()) {
                     val msg = d.o("message") ?: continue
                     val id = msg.s("toolCallId") ?: continue
                     childCalls[id] = childCalls[id]?.copy(end = e.time, output = textOf(msg["content"]),

@@ -1,7 +1,7 @@
 // node --test js/test/hardline.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { checkCommand } from '../packages/plugin-guard/hardline.js'
+import { checkCommand, isReadOnlyCommand } from '../packages/plugin-guard/hardline.js'
 
 const opts = { cwd: '/data/user/0/app/files/home', env: { HOME: '/data/user/0/app/files/home' } }
 const blocked = {
@@ -10,7 +10,7 @@ const blocked = {
     'rm -rf /', 'rm -rf /*', 'sudo rm -rf --no-preserve-root /', 'cd /tmp && rm -rf /storage', 'busybox rm -rf /sdcard',
     "sh -c 'rm -rf /sdcard'", 'su -c "rm -rf /data/media/0"', 'echo $(rm -rf /sdcard)', 'rm -rf $EXTERNAL_STORAGE',
     'rm -rf ${EXTERNAL_STORAGE}/', '/system/bin/rm -rf /sdcard/../sdcard', 'rm -rf /s*', 'eval "rm -rf /sdcard"',
-    'echo /sdcard | xargs rm -rf', 'env X=1 rm -Rf /storage/self/primary/',
+    'echo /sdcard | xargs rm -rf', 'env X=1 rm -Rf /storage/self/primary/', 'cd /sdcard && rm -rf *', 'cd /storage/emulated/0; rm -rf ./*',
   ],
   'rm-system-dir': ['rm /system/bin/sh', 'rm -rf /system/app', 'rm -f /vendor/etc/x', 'rm -rf /proc/1', 'toybox rm /etc/hosts'],
   'find-delete-protected': ['find /sdcard -name "*.jpg" -delete', 'find / -exec rm {} \\;'],
@@ -56,3 +56,17 @@ test('blocks a script file that wipes storage', () => {
 for (const cmd of allowed) {
   test(`allows ${cmd}`, () => assert.equal(checkCommand(cmd, opts), undefined))
 }
+test('cd only moves later commands; a narrower directory stays allowed', () => {
+  assert.equal(checkCommand('cd /sdcard/Download && rm -rf *', opts), undefined)
+  assert.equal(checkCommand('rm -rf *', { ...opts, cwd: '/sdcard' })?.rule, 'rm-protected-root')
+})
+test('read-only shell commands are recognised (auto-approved by plugin-guard)', () => {
+  for (const cmd of ['ls -la /sdcard', 'getprop ro.build.version.release', 'dumpsys battery', 'settings get global airplane_mode_on',
+    'cmd package list packages -3', 'cd /sdcard && ls | head -20', 'find . -name "*.jpg" 2>/dev/null | wc -l', 'logcat -d -t 50', 'cat $(ls *.txt)']) {
+    assert.ok(isReadOnlyCommand(cmd), cmd)
+  }
+  for (const cmd of ['rm a', 'ls > out.txt', 'env', 'find . -delete', 'sort -o x y', 'settings put global x 1', 'tail -f log',
+    'echo $(rm x)', 'PATH=/x ls', 'sed -i s/a/b/ f', 'dumpsys battery set level 5', './run.sh', 'ls &> f']) {
+    assert.ok(!isReadOnlyCommand(cmd), cmd)
+  }
+})

@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
@@ -63,8 +64,18 @@ open class ConversationController(
     val live: StateFlow<SessionLive> = sessionId.flatMapLatest { id -> flow { emitAll(store.state(id)) } }
         .stateIn(viewModelScope, SharingStarted.Eagerly, SessionLive(sessionId.value))
 
+    /**
+     * A model / effort change waits (the engine keeps its current route) while any run is active:
+     * the route is process-wide and switching it restarts the engine. True while the settings differ
+     * from the running engine's route for that reason; the composer says the change applies later.
+     */
+    val modelChangePending: StateFlow<Boolean> = combine(engine.route, settings, store.status) { route, st, status ->
+        route != null && (route.model != st.model || route.effort != st.effort.id) && status.values.any { it != RowStatus.Idle }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     val conversation: StateFlow<Conversation> = live
         .distinctUntilChangedBy { Triple(it.sessionId, it.events.size, it.running) }
+        .conflate()
         .map { Projector.conversation(it.events, it.running) }
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Eagerly, Conversation())
@@ -74,6 +85,7 @@ open class ConversationController(
     val focusRecord = MutableStateFlow<String?>(null)
 
     val trajectory: StateFlow<Trajectory?> = combine(view, live.distinctUntilChangedBy { Triple(it.sessionId, it.events.size, it.running) }) { v, l -> v to l }
+        .conflate()
         .flatMapLatest { (v, l) ->
             if (v != SessionView.Trajectory) flowOf<Trajectory?>(null)
             else flow<Trajectory?> { emit(Projector.trajectory(l.events, store.childEvents(l.sessionId), l.running)) }
@@ -81,21 +93,27 @@ open class ConversationController(
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    init { store.setViewing(this, id) }
+
     open fun open(id: String) {
         sessionId.value = id
         view.value = SessionView.Chat
-        store.setViewing(id)
+        store.setViewing(this, id)
     }
 
     open fun newSession() {
         sessionId.value = store.newSessionId()
         view.value = SessionView.Chat
-        store.setViewing(sessionId.value)
+        store.setViewing(this, sessionId.value)
     }
 
+    /** The session's preset is the store's own; [live] can still be the previous session's right after open/newSession. */
     fun send(text: String, images: List<Pair<String, String>> = emptyList(), now: Boolean = false) = viewModelScope.launch {
-        store.send(sessionId.value, text, images, live.value.preset, now = now)
+        store.send(sessionId.value, text, images, now = now)
     }
+
+    /** The composer took [SessionLive.restoredDraft] (queued messages handed back after a stop or failure). */
+    fun consumeRestoredDraft() = store.consumeRestoredDraft(sessionId.value)
 
     fun stop() = viewModelScope.launch { store.stop() }
     fun retry(e: TurnError) = viewModelScope.launch { store.retry(sessionId.value, e) }
@@ -112,7 +130,7 @@ open class ConversationController(
 
     fun inspect(callId: String) { view.value = SessionView.Trajectory; focusRecord.value = "k$callId" }
 
-    override fun onCleared() { store.setViewing(null) }
+    override fun onCleared() { store.setViewing(this, null) }
 }
 
 @HiltViewModel
@@ -126,8 +144,6 @@ class HomeViewModel @Inject constructor(
 
     /** Text to drop into the composer (e.g. "新建" on the automation screen). */
     val prefill = MutableStateFlow<String?>(null)
-
-    init { store.setViewing(id) }
 
     fun newSession(prefillText: String?) { newSession(); prefill.value = prefillText }
 

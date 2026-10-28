@@ -42,11 +42,11 @@ class ShellGate @Inject constructor(val shell: ShizukuShell, private val session
         if (s.ready) return true
         if (call.unattended || call.sessionId.isEmpty() || access.isDeclined(call.sessionId)) return false
         if (optional && (s == ShellState.NotInstalled || s is ShellState.Unsupported)) return false
-        val answered = coroutineScope {
+        val answered = call.waitFor("set up Shizuku") { coroutineScope {
             val ready = async { access.state.first { it.ready }; true }
             val asked = async { sessions.get().requestPermission(call.sessionId, toolName, SHIZUKU_WHAT) }
             select { ready.onAwait { it }; asked.onAwait { it } }.also { ready.cancel(); asked.cancel() }
-        }
+        } }
         if (access.refresh().ready) return true
         if (!answered) access.decline(call.sessionId)
         return false
@@ -62,14 +62,12 @@ class ShellGate @Inject constructor(val shell: ShizukuShell, private val session
         })
     }
 
-    /** Appended to model-facing descriptions so the agent knows what will actually happen right now. */
-    fun describe(use: ShellUse, fallback: String?): String {
-        val s = access.state.value
-        return when {
-            use == ShellUse.None -> ""
-            s.ready -> " [Shizuku ready: runs directly.]"
-            use == ShellUse.Fallback -> " [Now: ${s.reason}, so it will ${fallback ?: "use a non-shell fallback"}.]"
-            else -> " [Currently unavailable: ${s.reason}. Calling it shows the user a Shizuku setup card; if they decline, don't call it again.]"
+    companion object {
+        /** Appended to model-facing descriptions. Never includes live state (see CapabilityHub.listed). */
+        fun staticNote(use: ShellUse, fallback: String?): String = when (use) {
+            ShellUse.None -> ""
+            ShellUse.Fallback -> " [Uses Shizuku (shell access) when it is ready; otherwise it will ${fallback ?: "use a non-shell fallback"}. The result says which path ran.]"
+            ShellUse.Required -> " [Needs Shizuku (shell access). If it is not ready, the call shows the user a Shizuku setup card; if it returns shizuku_unavailable, don't call Shizuku-only tools again this session.]"
         }
     }
 }

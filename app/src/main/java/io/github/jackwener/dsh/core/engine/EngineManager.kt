@@ -16,6 +16,7 @@ import io.github.jackwener.dsh.core.data.SecretStore
 import io.github.jackwener.dsh.core.data.SettingsRepository
 import io.github.jackwener.dsh.core.session.SessionStore
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -35,6 +36,7 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 import java.io.File
 import java.util.Locale
+import java.util.TimeZone
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -51,8 +53,8 @@ class EngineStartException(message: String, val log: String?, cause: Throwable) 
 /** Android refused to start the engine's foreground service from the background (Android 12+). */
 class EngineBackgroundStartException(cause: Throwable) : Exception("foreground service start not allowed from the background", cause)
 
-/** The process-wide SDK route (`initialize`): provider + model + effort. */
-private data class Route(val provider: String, val model: String, val effort: String)
+/** The process-wide SDK route (`initialize`): provider + model + effort ([effort] is the Effort id). */
+data class EngineRoute(val provider: String, val model: String, val effort: String)
 
 /**
  * Owns the `:engine` process from the app side: starts it on demand, wires the SDK and capability
@@ -72,7 +74,7 @@ class EngineManager @Inject constructor(
     private val sessions: Lazy<SessionStore>,
     private val account: Lazy<AccountRepository>,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> Log.e(TAG, "engine task crashed", e) })
     private val mutex = Mutex()
     private val _state = MutableStateFlow<EngineState>(EngineState.Stopped)
     val state: StateFlow<EngineState> = _state.asStateFlow()
@@ -90,7 +92,14 @@ class EngineManager @Inject constructor(
      * retired generation still delivers describes a process that no longer exists.
      */
     @Volatile var retiredGeneration: Int = 0; private set
-    private var activeRoute: Route? = null
+    private val _route = MutableStateFlow<EngineRoute?>(null)
+    /** Route of the running engine (null while stopped). A settings change that differs waits until no run is active. */
+    val route: StateFlow<EngineRoute?> = _route.asStateFlow()
+    private var activeRoute: EngineRoute?
+        get() = _route.value
+        set(v) { _route.value = v }
+    /** Device time zone the running engine was started with (TZ is read once, at process start). */
+    @Volatile private var startedTz: String = TimeZone.getDefault().id
     /** Whether an SDK session was opened in this generation (then a route change needs a restart). */
     @Volatile private var sessionsOpened = false
     private var death: CompletableDeferred<Unit>? = null
@@ -100,22 +109,30 @@ class EngineManager @Inject constructor(
     val restarts = RestartPolicy()
 
     private fun wantedRoute(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean) =
-        Route(if (!hasKey && account.get().signedIn) "deepseek-account" else "deepseek-official", st.model, st.effort.id)
+        EngineRoute(if (!hasKey && account.get().signedIn) "deepseek-account" else "deepseek-official", st.model, st.effort.id)
 
     /**
      * Returns a ready SDK peer for prompts, starting the engine if needed. The route is
      * process-wide (`initialize`): a changed model / effort / credential route re-initializes an
      * engine that has not opened sessions yet, or restarts an idle one, before the next prompt.
+     * While any run is active (including the caller's own, when it steers a running session) the
+     * old route is kept: restarting would kill those turns.
      * Throws [NoCredentialsException] (with the engine left running, so the user can sign in)
      * when there is neither an API key nor an account login.
      */
+    /** The running engine's channel, without starting one (null while stopped or starting). */
+    fun sdkIfReady(): JsonRpcPeer? = sdk?.takeIf { state.value == EngineState.Ready }
+
     suspend fun sdk(): JsonRpcPeer = mutex.withLock {
         val st = settings.current()
         val hasKey = secrets.read() != null
         val peer = sdk?.takeIf { _state.value == EngineState.Ready }?.let { peer ->
             val want = wantedRoute(st, hasKey)
             when {
-                want == activeRoute || sessions.get().hasEngineRuns() -> peer
+                sessions.get().hasEngineRuns() -> peer
+                // The device time zone changed since start: a new process picks it up (when idle, like a route change).
+                TimeZone.getDefault().id != startedTz -> { Log.i(TAG, "time zone changed: restarting engine"); shutdownLocked(); null }
+                want == activeRoute -> peer
                 !sessionsOpened -> runCatching { initialize(peer, want); peer }.getOrElse {
                     Log.w(TAG, "re-initialize failed; restarting", it); shutdownLocked(); null
                 }
@@ -134,7 +151,7 @@ class EngineManager @Inject constructor(
     /** SessionStore is about to open (create/resume) an SDK session in the current generation. */
     fun markSessionOpened() { sessionsOpened = true }
 
-    private suspend fun initialize(peer: JsonRpcPeer, route: Route) {
+    private suspend fun initialize(peer: JsonRpcPeer, route: EngineRoute) {
         withTimeout(90_000) {
             peer.request("initialize", buildJsonObject {
                 put("cwd", File(context.filesDir, "home").path)
@@ -154,7 +171,17 @@ class EngineManager @Inject constructor(
         val t0 = System.currentTimeMillis()
         val gen = generation + 1
         try {
-            val service = bind(gen)
+            var service = bind(gen)
+            if (runCatching { service.isRunning() }.getOrDefault(false)) {
+                // A previous :main died while :engine survived; Node runs once per process, so replace it.
+                Log.w(TAG, "engine process already ran Node; replacing it")
+                val dying = death
+                connection?.let { runCatching { context.unbindService(it) } }
+                connection = null
+                killEngineProcess()
+                withTimeoutOrNull(5_000) { dying?.await() }
+                service = bind(gen)
+            }
             val tBound = System.currentTimeMillis()
             val handles = withContext(Dispatchers.IO) { service.start(environment(secrets.read())) }
             val sdkIn = ParcelFileDescriptor.AutoCloseOutputStream(handles.pfd("sdk_in"))
@@ -169,7 +196,7 @@ class EngineManager @Inject constructor(
                 ParcelFileDescriptor.AutoCloseOutputStream(ParcelFileDescriptor.dup(bridgeFd.fileDescriptor)),
                 scope,
                 onRequest = { m, p -> capabilities.get().onBridgeRequest(m, p) },
-                onNotification = { m, p -> if (m == "budget/exceeded") sessions.get().onBudgetExceeded(p) },
+                onNotification = { m, p -> if (m == "budget/exceeded") sessions.get().onBudgetExceeded(p) else capabilities.get().onBridgeNotification(m, p) },
                 onClosed = {})
             peer.start(); bridgePeer.start()
             sessionsOpened = false
@@ -272,6 +299,10 @@ class EngineManager @Inject constructor(
 
     private fun teardown(retire: Int) {
         retiredGeneration = maxOf(retiredGeneration, retire)
+        // Every request this generation is still serving (approval cards, device tool calls, unlock
+        // waits) is void now: cancel them so nothing acts later or answers into a dead pipe (EngineCalls).
+        val cause = EngineCallCancelled("engine generation $retire ended")
+        sdk?.cancelRequests(cause); bridge?.cancelRequests(cause)
         sdk = null; bridge = null
         activeRoute = null
         account.get().onEngineStopped()
@@ -312,6 +343,7 @@ class EngineManager @Inject constructor(
     }
 
     private fun environment(apiKey: String?) = Bundle().apply {
+        startedTz = TimeZone.getDefault().id
         val files = context.filesDir
         putString("DSH_HOME", File(files, "dsh-home").path)
         putString("HOME", File(files, "home").path)
@@ -322,6 +354,10 @@ class EngineManager @Inject constructor(
         apiKey?.let { putString("DEEPSEEK_API_KEY", it) }
         putString("DSH_ANDROID_PACKAGE", context.packageName)
         putString("DSH_ANDROID_LOCALE", Locale.getDefault().toLanguageTag())
+        // Node otherwise runs in UTC (local time for the model, daily budget at local midnight).
+        // DSH_ANDROID_TZ lets the bundle's preload re-apply it where AT_SECURE makes Node drop TZ.
+        putString("TZ", startedTz)
+        putString("DSH_ANDROID_TZ", startedTz)
         putString("NODE_OPTIONS", "--max-old-space-size=768")
         putString("DSH_TELEMETRY_DISABLED", "1")
         putString("NARB_DISABLE_NATIVE_CACHE", "1")

@@ -30,6 +30,8 @@
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <uses-permission android:name="android.permission.FLASHLIGHT" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- AlarmClock.ACTION_SET_ALARM / ACTION_SET_TIMER handlers (DeskClock HandleApiCalls) require it. -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
     <queries>
         <intent><action android:name="android.intent.action.MAIN" /></intent>
@@ -48,6 +50,7 @@
         android:theme="@style/Theme.Dsh"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:localeConfig="@xml/locales_config"
         android:enableOnBackInvokedCallback="true"
         android:largeHeap="true"
         android:extractNativeLibs="true"
@@ -195,6 +198,7 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

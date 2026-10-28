@@ -19,11 +19,11 @@
 -			default: throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`);
 +			default: {
 +				// DSH-Android: methods contributed by profile plugins through the
-+				// `sdkExtensions` service ({ resolve(method) → handler | undefined }),
-+				// e.g. the account surface of @dsh-android/plugin-account. They do not
-+				// require `initialize`, but wait for the loader like it does.
++				// `sdkExtensions` service ({ resolve(method) → handler | undefined },
++				// @dsh-android/plugin-account) or a `sdk-extensions/resolve` bail listener
++				// (@dsh-android/plugin-guard). They do not require `initialize`, but wait for the loader like it does.
 +				await this.ctx.get("loader")?.await();
-+				const extension = this.ctx.get("sdkExtensions")?.resolve(method);
++				const extension = this.ctx.get("sdkExtensions")?.resolve(method) ?? this.ctx.bail("sdk-extensions/resolve", method);
 +				if (typeof extension === "function") return await extension(params ?? {}, this.lifetime.signal) ?? {};
 +				throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`);
 +			}

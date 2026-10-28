@@ -88,4 +88,7 @@ dependencies {
     testImplementation(libs.junit)
     // Geofences on devices with Play services (background-FGS-start exempt); LocationManager otherwise.
     implementation(libs.play.services.location)
+    // PDF text for file_read (Apache-2.0, ~3 MB). BouncyCastle is only needed for encrypted PDFs, which
+    // file_read reports as unreadable instead (saves ~8 MB).
+    implementation(libs.pdfbox.android) { exclude(group = "org.bouncycastle") }
 }

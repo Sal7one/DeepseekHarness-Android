@@ -16,8 +16,8 @@
 - id: sandbox-policy
   config:
     # Android has no bwrap/landlock/seatbelt chain (sandbox-local would fail
-    # closed). Run unconfined; every mutating tool is approval-gated instead
-    # (plugin-guard asks for shell/fs writes, plugin-device for device tools).
+    # closed). Run unconfined; mutating tools are approval-gated instead
+    # (plugin-guard for shell/fs writes, plugin-device for device tools).
     mode: danger-full-access
     workspaceRoot: !!js "process.env.HOME || process.cwd()"
 
@@ -58,23 +58,43 @@
 # tmux context is meaningless on Android (no tmux).
 - id: tmux-context
   disabled: true
+# Cold start: the OTel exporter stack (+ got) and the pi-ai multi-provider adapter (+ openai,
+# Anthropic, Google, Bedrock SDKs) were ~half of all modules loaded at boot (1002 → ~500).
+# Telemetry export is off on the phone and the product is DeepSeek-only (llm-deepseek routes stay).
+# build-engine.sh prunes the provider SDKs only pi-ai reaches.
+- id: otel
+  disabled: true
+- id: llm-pi-ai
+  disabled: true
+
+# ── rows dsh-base leaves to the Web presets ─────────────────────────────────
+# Current date/time/zone on each request (relative tasks: "alarm tomorrow 7:00", "SMS from the
+# last hour", rule_create epochs). The zone is the process zone: the app sets TZ /
+# DSH_ANDROID_TZ (android-env applies it); SDK prompts carry it as clientTimeZone (patch 11).
+- insert:
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+      config:
+        refreshIntervalMs: 600000
+    # Structured clarifying questions (ask_user_question → user-question/ask, patch 08); the app
+    # shows tap-to-choose cards. Unattended runs get automatic "nobody is available" answers
+    # from plugin-guard.
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
 
 # ── DSH-Android plugins ────────────────────────────────────────────────────
 - insert:
     - id: android-device
       name: '@dsh-android/plugin-device'
-      config:
-        # Timeouts (ms) for capability/invoke; needsUnlock tools wait for the
-        # user to unlock the phone (the app resolves with device_locked_timeout).
-        invokeTimeoutMs: 120000
-        unlockTimeoutMs: 900000
+      # Per-tool timeouts come from each ToolDescriptor's timeoutMs (ENGINE-CONTRACT §3.1).
 
     - id: android-guard
       name: '@dsh-android/plugin-guard'
       config:
         locale: !!js "process.env.DSH_ANDROID_LOCALE || ''"
-        # Tools that mutate state outside the device bridge and therefore ask
-        # for approval on every call (no OS sandbox on Android).
+        # Built-ins that mutate state outside the device bridge and therefore ask
+        # for approval (no OS sandbox on Android) — except read-only shell commands and
+        # write/edit inside HOME/TMPDIR, which plugin-guard allows directly.
         askTools: [bash, write, edit]
 
     # DeepSeek account login. dsh-base mounts the account provider

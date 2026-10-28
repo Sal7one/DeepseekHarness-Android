@@ -31,15 +31,25 @@ class MediaTools @Inject constructor(@ApplicationContext private val context: Co
                 val c = sessions.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING } ?: sessions.firstOrNull()
                     ?: return ToolResult.text("Nothing is playing.")
                 val t = c.transportControls
-                val playing = c.playbackState?.state == PlaybackState.STATE_PLAYING
-                when (args.reqStr("action")) {
+                val action = args.reqStr("action")
+                val wasPlaying = c.playbackState?.state == PlaybackState.STATE_PLAYING
+                when (action) {
                     "play" -> t.play(); "pause" -> t.pause(); "stop" -> t.stop()
-                    "toggle" -> if (playing) t.pause() else t.play()
+                    "toggle" -> if (wasPlaying) t.pause() else t.play()
                     "next" -> t.skipToNext(); "previous" -> t.skipToPrevious()
                 }
+                // Report the state after the action, not before it (players update asynchronously).
+                if (action != "status") kotlinx.coroutines.delay(400)
                 val md = c.metadata
-                return ToolResult.text("${c.packageName}: ${md?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE) ?: "?"} — " +
-                    "${md?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST) ?: ""} (${if (playing) "playing" else "paused"})")
+                val state = when (c.playbackState?.state) {
+                    PlaybackState.STATE_PLAYING -> "playing"; PlaybackState.STATE_PAUSED -> "paused"; PlaybackState.STATE_STOPPED -> "stopped"
+                    PlaybackState.STATE_BUFFERING, PlaybackState.STATE_CONNECTING -> "loading"
+                    PlaybackState.STATE_SKIPPING_TO_NEXT, PlaybackState.STATE_SKIPPING_TO_PREVIOUS -> "skipping"
+                    else -> "idle"
+                }
+                return ToolResult.text((if (action != "status") "Sent $action. " else "") +
+                    "${c.packageName}: ${md?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE) ?: "?"} — " +
+                    "${md?.getString(android.media.MediaMetadata.METADATA_KEY_ARTIST) ?: ""} (now $state)")
             }
         },
     )

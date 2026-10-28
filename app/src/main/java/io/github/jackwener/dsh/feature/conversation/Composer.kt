@@ -55,6 +55,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -88,16 +91,56 @@ import java.io.File
 
 data class ImageAttachment(val mime: String, val base64: String, val thumb: Bitmap)
 
+/** A document copied into the agent's home (`home/attachments`); referenced by path when sent. */
+data class FileAttachment(val name: String, val path: String, val size: Long)
+
+const val MAX_IMAGES = 4
+
 @Stable
 class ComposerState {
     var text by mutableStateOf("")
     val images = mutableStateListOf<ImageAttachment>()
-    val isEmpty get() = text.isBlank() && images.isEmpty()
-    fun clear() { text = ""; images.clear() }
+    val files = mutableStateListOf<FileAttachment>()
+    /** Picked attachments still decoding / copying; Send waits for them. */
+    var pending by mutableStateOf(0)
+    val isEmpty get() = text.isBlank() && images.isEmpty() && files.isEmpty()
+    fun clear() { text = ""; images.clear(); files.clear() }
+
+    /** The text to send: the draft plus a reference line per attached file. */
+    fun outgoingText(context: Context): String = buildString {
+        append(text.trim())
+        files.forEach { f -> if (isNotEmpty()) append('\n'); append(context.getString(R.string.attached_file, f.path)) }
+    }
 }
 
+/** Drafts per session for the life of the process (session switch, rotation, theme/locale change, panel → app). */
+private object Drafts {
+    private val map = HashMap<String, ComposerState>()
+    fun of(key: String) = map.getOrPut(key) { ComposerState() }
+}
+
+/** The composer draft for [key] (a session id); the text also survives process death via saved state. */
 @Composable
-fun rememberComposerState(key: Any?) = remember(key) { ComposerState() }
+fun rememberComposerState(key: String): ComposerState {
+    val state = remember(key) { Drafts.of(key) }
+    var saved by androidx.compose.runtime.saveable.rememberSaveable(key) { mutableStateOf(state.text) }
+    androidx.compose.runtime.LaunchedEffect(state) {
+        if (state.text.isEmpty() && saved.isNotEmpty()) state.text = saved
+        androidx.compose.runtime.snapshotFlow { state.text }.collect { saved = it }
+    }
+    return state
+}
+
+/**
+ * True once [ms] have passed since this composable appeared. The composer slot swaps cards for
+ * the composer in place, so a tap aimed at a card button (允许一次 …) can land on whatever moved
+ * under the finger; controls ignore taps until the slot has settled.
+ */
+@Composable
+fun rememberSettled(ms: Long = 600): () -> Boolean {
+    val since = remember { android.os.SystemClock.uptimeMillis() }
+    return { android.os.SystemClock.uptimeMillis() - since >= ms }
+}
 
 /** Model catalog shown by the model chip (dsh ui-model-selection). */
 val Models = listOf("deepseek-flash" to "DeepSeek-V4.1-Flash", "deepseek-v4-pro" to "DeepSeek-V4-Pro")
@@ -151,40 +194,67 @@ fun Composer(
     actions: ComposerActions = ComposerActions(),
     placeholder: String = stringResource(if (hero) R.string.composer_hint_hero else R.string.composer_hint),
     showChips: Boolean = true,
+    /** Send is allowed with an empty draft (e.g. the quick panel carries shared content). */
+    canSendEmpty: Boolean = false,
+    /** A model/effort change waits for a running task (fix-session's ConversationController.modelChangePending); defaults to this session running. */
+    modelChangePending: Boolean = running,
 ) {
     val c = Dsh.colors
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var plusOpen by remember { mutableStateOf(false) }
+    /** The "/" menu: non-focusable so the keyboard stays up while it is open. */
+    var slashOpen by remember { mutableStateOf(false) }
     var presetOpen by remember { mutableStateOf(false) }
     var modelOpen by remember { mutableStateOf(false) }
     var confirmFull by remember { mutableStateOf(false) }
+    val settled = rememberSettled()
+    // A preset change from elsewhere (session switch, approval) drops any half-finished choice.
+    androidx.compose.runtime.LaunchedEffect(preset) { presetOpen = false; confirmFull = false }
 
-    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(4)) { uris ->
-        scope.launch { uris.forEach { u -> loadImage(context, u)?.let { if (state.images.size < 4) state.images += it } } }
+    val pickImages = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES)) { uris ->
+        scope.launch { addImages(context, state, uris) }
     }
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) scope.launch {
-            val path = withContext(Dispatchers.IO) { importFile(context, uri) }
-            if (path != null) state.text = (state.text.trimEnd() + "\n" + context.getString(R.string.attached_file, path)).trimStart()
-        }
+        if (uri != null) scope.launch { addFile(context, state, uri) }
     }
 
     Column(
         modifier.fillMaxWidth().elevated(Radius.panel, c.borderL2, 8.dp).clip(Radius.panel).background(c.inputMajor).padding(top = 8.dp),
     ) {
-        if (state.images.isNotEmpty()) Row(Modifier.padding(horizontal = 10.dp, vertical = 2.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.images.isNotEmpty() || state.files.isNotEmpty() || state.pending > 0) Row(Modifier.padding(horizontal = 10.dp, vertical = 2.dp).horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val removeLabel = stringResource(R.string.remove_attachment)
             state.images.forEach { img ->
                 Box(Modifier.size(64.dp)) {
                     androidx.compose.foundation.Image(img.thumb.asImageBitmap(), null, Modifier.size(64.dp).clip(Radius.xl), contentScale = ContentScale.Crop)
                     Box(Modifier.align(Alignment.TopEnd).padding(2.dp).size(18.dp).clip(CircleShape).background(Color(0x99000000)).pressable({ state.images.remove(img) }, CircleShape),
-                        contentAlignment = Alignment.Center) { DIcon(R.drawable.dsw_close_outline, size = 10.dp, tint = Color.White) }
+                        contentAlignment = Alignment.Center) { DIcon(R.drawable.dsw_close_outline, size = 10.dp, tint = Color.White, contentDescription = removeLabel) }
+                }
+            }
+            repeat(state.pending) {
+                Box(Modifier.size(64.dp).clip(Radius.xl).background(c.selector), contentAlignment = Alignment.Center) { io.github.jackwener.dsh.core.designsystem.Spinner(16.dp) }
+            }
+            // dsh file chip: name + size, removable.
+            state.files.forEach { f ->
+                Row(Modifier.height(40.dp).widthIn(max = 220.dp).clip(Radius.md).background(c.selector).padding(start = 10.dp, end = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    DIcon(R.drawable.dsw_paperclip_outline, size = 14.dp, tint = c.labelSecondary)
+                    Spacer(Modifier.width(6.dp))
+                    Column(Modifier.weight(1f, fill = false)) {
+                        Text(f.name, style = DshType.xxs12m, color = c.labelPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(android.text.format.Formatter.formatShortFileSize(context, f.size), style = DshType.tiny10, color = c.labelTertiary, maxLines = 1)
+                    }
+                    IconBtn(R.drawable.dsw_close_outline, { state.files.remove(f) }, size = 32.dp, iconSize = 12.dp, contentDescription = removeLabel)
                 }
             }
         }
         BasicTextField(
             state.text,
-            { v -> state.text = v; if (v == "/") { plusOpen = true } },
+            { v ->
+                state.text = v
+                if (v == "/") slashOpen = true else if (slashOpen && !v.startsWith("/")) slashOpen = false
+            },
             Modifier.fillMaxWidth().heightIn(min = if (hero) 52.dp else 36.dp, max = 216.dp).padding(start = 14.dp, end = 8.dp, top = 4.dp),
             textStyle = DshType.base16.copy(color = c.labelPrimary),
             cursorBrush = SolidColor(c.business),
@@ -202,11 +272,11 @@ fun Composer(
         val narrow = maxWidth < 400.dp
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box {
-                Box(Modifier.size(28.dp).clip(CircleShape).background(c.selector).pressable({ plusOpen = true }, CircleShape), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(28.dp).clip(CircleShape).background(c.selector).pressable({ if (settled()) plusOpen = true }, CircleShape), contentAlignment = Alignment.Center) {
                     DIcon(R.drawable.dsw_plus_outline, size = 14.dp, tint = c.labelPrimary, contentDescription = stringResource(R.string.plus_hint))
                 }
-                DMenu(plusOpen, { plusOpen = false; if (state.text == "/") state.text = "" }) {
-                    val close = { plusOpen = false; if (state.text == "/") state.text = "" }
+                DMenu(plusOpen || slashOpen, { plusOpen = false; slashOpen = false; if (state.text == "/") state.text = "" }, focusable = !slashOpen) {
+                    val close = { plusOpen = false; slashOpen = false; if (state.text == "/") state.text = "" }
                     MenuSectionTitle(stringResource(R.string.menu_add))
                     MenuItem(stringResource(R.string.menu_image), { close(); pickImages.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, R.drawable.dsw_fullscreen_outline)
                     MenuItem(stringResource(R.string.menu_file), { close(); pickFile.launch(arrayOf("*/*")) }, R.drawable.dsw_paperclip_outline)
@@ -222,7 +292,11 @@ fun Composer(
                 }
             }
             if (showChips) Box {
-                Chip(PresetUi.icon(preset), if (narrow) null else stringResource(PresetUi.label(preset)), { presetOpen = true })
+                // Full access always shows its label (in the warn tone) so the mode is never icon-only.
+                val full = preset == PermissionPreset.Full
+                Chip(PresetUi.icon(preset), if (narrow && !full) null else stringResource(PresetUi.label(preset)), { if (settled()) presetOpen = true },
+                    description = stringResource(R.string.permission_chip_desc, stringResource(PresetUi.label(preset))),
+                    tint = if (full) c.warnLabel else c.labelSecondary, background = if (full) c.warnTertiary else Color.Transparent)
                 DMenu(presetOpen, { presetOpen = false }) {
                     PermissionPreset.entries.forEach { p ->
                         MenuItem(stringResource(PresetUi.label(p)), {
@@ -235,9 +309,11 @@ fun Composer(
             Spacer(Modifier.weight(1f))
             if (showChips && contextTokens > 0) ContextRing(contextTokens)
             if (showChips) Box {
-                Row(Modifier.height(28.dp).widthIn(max = 200.dp).clip(Radius.sm).pressable({ modelOpen = true }, Radius.sm).padding(start = 6.dp, end = 2.dp),
+                val modelDesc = stringResource(R.string.model_chip_desc, modelLabel(model), effort.label)
+                Row(Modifier.heightIn(min = 28.dp).widthIn(max = 200.dp).clip(Radius.sm).pressable({ if (settled()) modelOpen = true }, Radius.sm)
+                    .semantics(mergeDescendants = true) { contentDescription = modelDesc }.padding(start = 6.dp, end = 2.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text(modelLabel(model).removePrefix("DeepSeek-"), style = DshType.xs13m, color = c.labelSecondary, maxLines = 1)
+                    Text(modelLabel(model).removePrefix("DeepSeek-"), Modifier.weight(1f, fill = false), style = DshType.xs13m, color = c.labelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.width(4.dp))
                     Text(effort.label, style = DshType.xs13m, color = c.labelCaption, maxLines = 1)
                     Chevron(Modifier.padding(start = 2.dp), size = 12.dp)
@@ -248,10 +324,13 @@ fun Composer(
                     MenuDivider()
                     MenuSectionTitle(stringResource(R.string.effort))
                     Effort.entries.forEach { e -> MenuItem(e.label, { modelOpen = false; onEffort(e) }, null, stringResource(effortDesc(e)), selected = e == effort) }
-                    if (running) Text(stringResource(R.string.model_applies_next), Modifier.padding(8.dp), style = DshType.xxs12, color = c.labelCaption)
+                    if (modelChangePending) Text(stringResource(R.string.model_applies_next), Modifier.padding(8.dp), style = DshType.xxs12, color = c.labelCaption)
                 }
             }
-            SendButton(running, state.isEmpty, onSend, onStop)
+            SendButton(running, state.isEmpty && !canSendEmpty, {
+                if (state.pending > 0) android.widget.Toast.makeText(context, R.string.attachments_loading, android.widget.Toast.LENGTH_SHORT).show()
+                else onSend()
+            }, onStop)
         }
         }
     }
@@ -269,13 +348,13 @@ private fun effortDesc(e: Effort) = when (e) {
 
 /** Composer chip: height 28, R8, 13/20 weight 500 secondary, 14 dp icon + chevron. */
 @Composable
-private fun Chip(@DrawableRes icon: Int, label: String?, onClick: () -> Unit) {
-    val c = Dsh.colors
-    Row(Modifier.height(28.dp).clip(Radius.sm).pressable(onClick, Radius.sm).padding(start = 6.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-        DIcon(icon, size = 14.dp, tint = c.labelSecondary)
+private fun Chip(@DrawableRes icon: Int, label: String?, onClick: () -> Unit, description: String, tint: Color, background: Color) {
+    Row(Modifier.heightIn(min = 28.dp).clip(Radius.sm).background(background).pressable(onClick, Radius.sm)
+        .semantics(mergeDescendants = true) { contentDescription = description }.padding(start = 6.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        DIcon(icon, size = 14.dp, tint = tint)
         if (label != null) {
             Spacer(Modifier.width(4.dp))
-            Text(label, style = DshType.xs13m, color = c.labelSecondary, maxLines = 1)
+            Text(label, style = DshType.xs13m, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Chevron(Modifier.padding(start = 2.dp), size = 12.dp)
     }
@@ -287,8 +366,10 @@ fun SendButton(running: Boolean, empty: Boolean, onSend: () -> Unit, onStop: () 
     val c = Dsh.colors
     val stop = running && empty
     val enabled = stop || !empty
+    val label = stringResource(if (stop) R.string.stop_generating else R.string.send_message)
     Box(Modifier.size(34.dp).alpha(if (enabled) 1f else 0.4f).clip(CircleShape).background(c.info)
-        .pressable({ if (stop) onStop() else if (!empty) onSend() }, CircleShape, enabled), contentAlignment = Alignment.Center) {
+        .pressable({ if (stop) onStop() else if (!empty) onSend() }, CircleShape, enabled)
+        .semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(16.dp)) {
             if (stop) {
                 drawRoundRect(Color.White, topLeft = Offset(3.dp.toPx(), 3.dp.toPx()), size = Size(10.dp.toPx(), 10.dp.toPx()), cornerRadius = CornerRadius(3.dp.toPx()))
@@ -354,9 +435,9 @@ fun QueueDock(queue: List<QueuedMessage>, onEdit: (QueuedMessage) -> Unit, onDel
             Row(Modifier.fillMaxWidth().heightIn(min = 36.dp).padding(start = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (queue.size == 1) { DIcon(R.drawable.dsw_queue_outline, size = 14.dp, tint = c.labelTertiary); Spacer(Modifier.width(6.dp)) }
                 Text(q.text, Modifier.weight(1f), style = DshType.xs13, color = c.labelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                IconBtn(R.drawable.dsw_edit_outline, { onEdit(q) }, size = 32.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_edit))
-                IconBtn(R.drawable.dsw_trash_outline, { onDelete(q) }, size = 32.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_delete))
-                IconBtn(R.drawable.dsw_paper_plane_outline, { onSendNow(q) }, size = 32.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_steer))
+                IconBtn(R.drawable.dsw_edit_outline, { onEdit(q) }, size = 40.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_edit))
+                IconBtn(R.drawable.dsw_trash_outline, { onDelete(q) }, size = 40.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_delete))
+                IconBtn(R.drawable.dsw_paper_plane_outline, { onSendNow(q) }, size = 40.dp, iconSize = 14.dp, contentDescription = stringResource(R.string.queue_steer))
             }
         }
     }
@@ -388,6 +469,29 @@ fun TodoDock(todos: List<TodoItem>) {
 
 private fun Modifier.border0() = this
 
+/** Adds picked/shared images (up to [MAX_IMAGES]) with a placeholder while each decodes. */
+suspend fun addImages(context: Context, state: ComposerState, uris: List<Uri>) {
+    val room = MAX_IMAGES - state.images.size - state.pending
+    if (uris.size > room) android.widget.Toast.makeText(context, context.getString(R.string.images_limit, MAX_IMAGES), android.widget.Toast.LENGTH_SHORT).show()
+    val take = uris.take(room.coerceAtLeast(0))
+    state.pending += take.size
+    take.forEach { u ->
+        val img = loadImage(context, u)
+        state.pending -= 1
+        if (img != null) state.images += img
+        else android.widget.Toast.makeText(context, R.string.file_import_failed, android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Copies a picked/shared document into the agent's home and adds it as a file chip. */
+suspend fun addFile(context: Context, state: ComposerState, uri: Uri) {
+    state.pending += 1
+    val f = withContext(Dispatchers.IO) { importFile(context, uri) }
+    state.pending -= 1
+    if (f != null) state.files += f
+    else android.widget.Toast.makeText(context, R.string.file_import_failed, android.widget.Toast.LENGTH_SHORT).show()
+}
+
 private suspend fun loadImage(context: Context, uri: Uri): ImageAttachment? = withContext(Dispatchers.IO) {
     runCatching {
         val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -403,11 +507,32 @@ private suspend fun loadImage(context: Context, uri: Uri): ImageAttachment? = wi
 }
 
 /** Copies a picked document into the agent's home so dsh's file tools can read it. */
-private fun importFile(context: Context, uri: Uri): String? = runCatching {
+private fun importFile(context: Context, uri: Uri): FileAttachment? = runCatching {
     val name = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { if (it.moveToFirst()) it.getString(0) else null }
         ?: "file_${System.currentTimeMillis()}"
     val dir = File(context.filesDir, "home/attachments").apply { mkdirs() }
-    val dest = File(dir, name.replace('/', '_'))
-    context.contentResolver.openInputStream(uri)?.use { input -> dest.outputStream().use { input.copyTo(it) } }
-    dest.path
+    val safe = name.replace('/', '_')
+    // Never overwrite an earlier attachment with the same name: report.pdf, report (1).pdf, …
+    var dest = File(dir, safe)
+    var n = 1
+    while (dest.exists()) {
+        val dot = safe.lastIndexOf('.').takeIf { it > 0 } ?: safe.length
+        dest = File(dir, safe.substring(0, dot) + " ($n)" + safe.substring(dot)); n++
+    }
+    val input = context.contentResolver.openInputStream(uri) ?: return@runCatching null
+    input.use { i -> dest.outputStream().use { i.copyTo(it) } }
+    FileAttachment(name, dest.path, dest.length())
 }.getOrNull()
+
+/** Swallows taps until [settled] (see [rememberSettled]) so a card that just slid into place can't be hit by accident. */
+fun Modifier.ignoreTapsUntil(settled: () -> Boolean): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            val e = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+            if (!settled()) e.changes.forEach { it.consume() }
+        }
+    }
+}
+
+/** The draft of [sessionId] outside composition (e.g. the quick panel filling in shared content). */
+fun draftFor(sessionId: String): ComposerState = Drafts.of(sessionId)
