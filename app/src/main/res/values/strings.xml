@@ -451,6 +451,7 @@
     <string name="shz_body_denied">之前选择了拒绝，Shizuku 不会再弹窗。请在 Shizuku 的「授权应用」里打开 DSH。</string>
     <string name="shz_title_old">Shizuku 版本过旧</string>
     <string name="shz_body_old">这个版本不支持 DSH 需要的接口，请更新到最新版。</string>
+    <string name="shz_body_old_restart">已更新到最新版，但旧的 Shizuku 服务还在运行。打开 Shizuku 重新启动一次即可。</string>
     <string name="shz_title_ready">Shizuku 已就绪</string>
     <string name="shz_body_ready">DSH 可以直接开关 Wi‑Fi、蓝牙、移动数据并修改系统设置。</string>
     <string name="shz_body_resuming">已就绪，正在继续…</string>
@@ -458,10 +459,25 @@
     <string name="shz_tip_ok">知道了</string>
     <string name="shz_decline">不用了</string>
     <string name="shz_install">安装 Shizuku</string>
-    <string name="shz_update">更新 Shizuku</string>
+    <string name="shz_update">一键更新</string>
     <string name="shz_open">打开 Shizuku</string>
     <string name="shz_dev_options">开发者选项</string>
     <string name="shz_grant">授权</string>
+    <string name="shz_bundled_note">DSH 内置官方版 Shizuku %1$s，一键安装，不用离开 DSH。</string>
+    <string name="shz_installing">安装中…</string>
+    <string name="shz_inst_progress">正在安装 Shizuku…出现系统确认窗口时请点「安装」/「更新」。</string>
+    <string name="shz_inst_unknown_sources">请在打开的页面中打开「允许来自此来源的应用」，返回 DSH 后会自动继续安装。</string>
+    <string name="shz_inst_unknown_denied">还没有允许 DSH 安装应用，所以装不了 Shizuku。点「去允许」打开它。</string>
+    <string name="shz_inst_cancelled">已取消安装。</string>
+    <string name="shz_inst_failed">安装失败：%1$s。可以重试，或改用其他下载方式。</string>
+    <string name="shz_inst_allow">去允许</string>
+    <string name="shz_inst_elsewhere">其他下载方式</string>
+    <string name="shz_retry">重试</string>
+    <string name="shz_err_storage">存储空间不足</string>
+    <string name="shz_err_conflict">与已安装的 Shizuku 签名不一致（可能是非官方版本，请先卸载它）</string>
+    <string name="shz_err_incompatible">与这台设备不兼容</string>
+    <string name="shz_err_blocked">被系统或安全软件阻止</string>
+    <string name="shz_err_unknown">未知错误</string>
     <string name="shz_onb_title">增强能力（可选）</string>
     <string name="shz_onb_desc">大部分功能现在就能用。想让 DSH 直接切换系统开关，可以配好 Shizuku。</string>
     <string name="shz_onb_done">完成</string>
@@ -562,5 +578,7 @@
     <string name="loading">加载中…</string>
     <string name="set_web_group">网页</string>
     <string name="about_disclaimer_title">声明</string>
+    <string name="about_oss_title">开源许可</string>
+    <string name="about_oss_shizuku">内置 Shizuku %1$s（RikkaApps，Apache License 2.0），官方未修改的安装包，仅用于一键安装。点按查看许可证。</string>
     <string name="rule_missing">这个自动化任务已不存在</string>
 </resources>

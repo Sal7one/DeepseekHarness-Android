@@ -46,6 +46,7 @@ class SettingsViewModel @Inject constructor(
     /** Engine restarts go through the store, so the runs they kill end as stopped (not spinning forever). */
     private val sessions: io.github.jackwener.dsh.core.session.SessionStore,
     val shizuku: ShizukuShell,
+    private val shizukuInstaller: io.github.jackwener.dsh.core.platform.ShizukuInstaller,
     val account: io.github.jackwener.dsh.core.account.AccountRepository,
     usage: UsageDao,
 ) : ViewModel() {
@@ -111,7 +112,7 @@ class SettingsViewModel @Inject constructor(
         checks += DoctorCheck(if (zh) "厂商后台限制" else "Vendor background limits", null, tip, intent)
         val shell = shizuku.access.refresh()
         checks += DoctorCheck("Shizuku", if (shell == io.github.jackwener.dsh.core.platform.ShellState.NotInstalled) null else shell.ready,
-            shellStateLabel(context, shell), shellFixIntent(shizuku.access, shell))
+            shellStateLabel(context, shell), shellFixIntent(shizuku.access, shell, shizukuInstaller.bundled))
         val signedIn = account.signedIn
         checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn, when {
             hasKey -> "API Key " + (maskedKey ?: "")

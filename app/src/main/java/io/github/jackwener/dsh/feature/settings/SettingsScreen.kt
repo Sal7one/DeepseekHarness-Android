@@ -426,6 +426,16 @@ private fun AboutSection(vm: SettingsViewModel) {
         }, leading = { StateDot(when (engine) { EngineState.Ready -> DotKind.Done; is EngineState.Failed -> DotKind.Error; else -> DotKind.Idle }) },
             trailing = { DButton(stringResource(R.string.restart_engine), { vm.restartEngine(); vm.runDoctor() }, variant = BtnVariant.Outline, size = BtnSize.Sm) })
         SettingsRow(stringResource(R.string.about_disclaimer_title), stringResource(R.string.about_disclaimer), divider = true)
+        // Attribution for the bundled official Shizuku APK (Apache-2.0); tap shows the license shipped with it.
+        val shizukuLicense = remember { runCatching { vm.context.assets.open("shizuku/LICENSE").bufferedReader().use { it.readText() } }.getOrNull() }
+        var showLicense by remember { mutableStateOf(false) }
+        if (shizukuLicense != null) SettingsRow(stringResource(R.string.about_oss_title),
+            stringResource(R.string.about_oss_shizuku, io.github.jackwener.dsh.BuildConfig.SHIZUKU_VERSION), divider = true,
+            onClick = { showLicense = !showLicense },
+            trailing = { DIcon(R.drawable.dsw_chevron_right_outline, size = 14.dp, tint = c.labelTertiary) })
+        if (showLicense && shizukuLicense != null) Box(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
+            CodeCard(shizukuLicense, label = "Shizuku · LICENSE (Apache-2.0)", maxHeight = 320.dp)
+        }
     }
     SettingsGroupTitle(stringResource(R.string.doctor))
     SettingsCard {

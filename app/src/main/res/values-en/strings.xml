@@ -451,6 +451,7 @@
     <string name="shz_body_denied">You denied it before, so Shizuku won\'t ask again. Turn DSH on under Authorized apps in Shizuku.</string>
     <string name="shz_title_old">Shizuku is out of date</string>
     <string name="shz_body_old">This version lacks the API DSH needs. Please update to the latest release.</string>
+    <string name="shz_body_old_restart">Shizuku is up to date, but the old service is still running. Open Shizuku and start it again.</string>
     <string name="shz_title_ready">Shizuku is ready</string>
     <string name="shz_body_ready">DSH can switch Wi‑Fi, Bluetooth and mobile data and change system settings directly.</string>
     <string name="shz_body_resuming">Ready — continuing…</string>
@@ -458,10 +459,25 @@
     <string name="shz_tip_ok">Got it</string>
     <string name="shz_decline">Not now</string>
     <string name="shz_install">Install Shizuku</string>
-    <string name="shz_update">Update Shizuku</string>
+    <string name="shz_update">Update now</string>
     <string name="shz_open">Open Shizuku</string>
     <string name="shz_dev_options">Developer options</string>
     <string name="shz_grant">Allow</string>
+    <string name="shz_bundled_note">DSH ships the official Shizuku %1$s, so it installs in one tap without leaving DSH.</string>
+    <string name="shz_installing">Installing…</string>
+    <string name="shz_inst_progress">Installing Shizuku… When the system asks, tap Install / Update.</string>
+    <string name="shz_inst_unknown_sources">On the page that opens, turn on “Allow from this source”, then come back — the install continues by itself.</string>
+    <string name="shz_inst_unknown_denied">DSH isn\'t allowed to install apps yet, so Shizuku can\'t be installed. Tap Allow to turn it on.</string>
+    <string name="shz_inst_cancelled">Install cancelled.</string>
+    <string name="shz_inst_failed">Install failed: %1$s. Try again, or download it another way.</string>
+    <string name="shz_inst_allow">Allow</string>
+    <string name="shz_inst_elsewhere">Download elsewhere</string>
+    <string name="shz_retry">Retry</string>
+    <string name="shz_err_storage">not enough storage</string>
+    <string name="shz_err_conflict">it conflicts with the installed Shizuku (likely an unofficial build — uninstall it first)</string>
+    <string name="shz_err_incompatible">not compatible with this device</string>
+    <string name="shz_err_blocked">blocked by the system or a security app</string>
+    <string name="shz_err_unknown">unknown error</string>
     <string name="shz_onb_title">Enhanced access (optional)</string>
     <string name="shz_onb_desc">Most things already work. Set up Shizuku if you want DSH to flip system switches directly.</string>
     <string name="shz_onb_done">Done</string>
@@ -562,5 +578,7 @@
     <string name="loading">Loading…</string>
     <string name="set_web_group">Web</string>
     <string name="about_disclaimer_title">Disclaimer</string>
+    <string name="about_oss_title">Open-source licenses</string>
+    <string name="about_oss_shizuku">Includes Shizuku %1$s (RikkaApps, Apache License 2.0), the official unmodified APK, used only for one-tap install. Tap to view the license.</string>
     <string name="rule_missing">This automation no longer exists</string>
 </resources>

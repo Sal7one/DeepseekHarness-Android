@@ -133,7 +133,7 @@ private fun ShizukuCard(p: PendingPermission, onAnswer: (Boolean) -> Unit) {
     val flow = rememberShellGuideFlow(access, s)
     var answered by remember(p.requestKey) { mutableStateOf(false) }
     AttentionCard(stringResource(R.string.shz_strip), answered || s.ready, body = {
-        ShellGuideBody(s, stringResource(ToolPresentation.info(p.toolName).title))
+        ShellGuideBody(s, stringResource(ToolPresentation.info(p.toolName).title), flow)
     }) {
         ShellGuideActions(s, flow, onDecline = { answered = true; onAnswer(false) }, enabled = !answered)
     }
