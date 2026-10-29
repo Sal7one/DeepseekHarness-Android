@@ -14,12 +14,26 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.inject.Inject
 import javax.inject.Singleton
 
-/** API key storage: AES-GCM with a non-exportable Android Keystore key. Excluded from backups. */
+/**
+ * Secret storage: AES-GCM with a non-exportable Android Keystore key, files in noBackupFilesDir
+ * (excluded from backups). The unnamed slot is the DeepSeek API key; named slots hold third-party
+ * provider keys (`provider-<routeId>`), passed to the engine only as environment variables.
+ */
 @Singleton
 class SecretStore @Inject constructor(@ApplicationContext context: Context) {
-    private val file = File(context.noBackupFilesDir, "deepseek.key")
+    private val dir = context.noBackupFilesDir
+    private val file = File(dir, "deepseek.key")
+    private fun named(name: String) = File(dir, "secret-" + name.filter { it.isLetterOrDigit() || it == '-' || it == '_' } + ".key")
 
-    fun read(): String? = runCatching {
+    fun read(): String? = read(file)
+    fun write(value: String) = write(file, value)
+    fun clear() { file.delete() }
+
+    fun read(name: String): String? = read(named(name))
+    fun write(name: String, value: String) = write(named(name), value)
+    fun clear(name: String) { named(name).delete() }
+
+    private fun read(file: File): String? = runCatching {
         if (!file.exists()) return null
         val (iv, data) = file.readText().split(':').map { Base64.decode(it, Base64.NO_WRAP) }
         val c = Cipher.getInstance(TRANSFORM)
@@ -27,14 +41,12 @@ class SecretStore @Inject constructor(@ApplicationContext context: Context) {
         String(c.doFinal(data))
     }.getOrNull()
 
-    fun write(value: String) {
+    private fun write(file: File, value: String) {
         val c = Cipher.getInstance(TRANSFORM)
         c.init(Cipher.ENCRYPT_MODE, key())
         val enc = c.doFinal(value.toByteArray())
         file.writeText(Base64.encodeToString(c.iv, Base64.NO_WRAP) + ":" + Base64.encodeToString(enc, Base64.NO_WRAP))
     }
-
-    fun clear() { file.delete() }
 
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

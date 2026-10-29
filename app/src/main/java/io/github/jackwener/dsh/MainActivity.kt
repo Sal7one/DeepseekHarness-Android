@@ -57,10 +57,10 @@ import javax.inject.Inject
 
 @HiltViewModel
 class MainViewModel @Inject constructor(settings: SettingsRepository, secrets: SecretStore, account: AccountRepository) : ViewModel() {
-    /** null = still loading (keeps the splash up). */
-    val theme = settings.settings.map { it.theme }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    /** A model credential exists: an API key, or a DeepSeek account login (cached from the engine). */
-    val hasCredentials = secrets.read() != null || account.signedIn
+    private val deepSeek = secrets.read() != null || account.signedIn
+    /** null = still loading (keeps the splash up). Second: a model credential exists — an API key, a
+     *  DeepSeek account login (cached from the engine), or an enabled third-party provider. */
+    val boot = settings.settings.map { it.theme to (deepSeek || it.providers.any { p -> p.enabled }) }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 }
 
 /**
@@ -89,7 +89,8 @@ class MainActivity : ComponentActivity() {
         handleAppLink(intent)
         setContent {
             val vm: MainViewModel = hiltViewModel()
-            val theme by vm.theme.collectAsStateWithLifecycle()
+            val boot by vm.boot.collectAsStateWithLifecycle()
+            val theme = boot?.first
             splash.setKeepOnScreenCondition { theme == null }
             DshTheme(theme ?: ThemeMode.System) {
                 val c = Dsh.colors
@@ -98,7 +99,7 @@ class MainActivity : ComponentActivity() {
                 val platformPage by account.page.collectAsStateWithLifecycle()
                 CompositionLocalProvider(LocalAccount provides account) {
                     Box(Modifier.fillMaxSize().background(c.bgBase)) {
-                        if (theme != null) AppNav(vm.hasCredentials, platformPage == null)
+                        boot?.let { AppNav(it.second, platformPage == null) }
                         platformPage?.let { PlatformWebScreen(it, account) }
                         AccountToastHost(account)
                     }
@@ -147,6 +148,10 @@ class MainActivity : ComponentActivity() {
         NavHost(nav, startDestination = start, enterTransition = { fadeIn() }, exitTransition = { fadeOut() }) {
             composable("onboarding") {
                 Onboarding(showKey = onboardingKey, onShowKey = { onboardingKey = it },
+                    onThirdParty = {
+                        nav.navigate("home") { popUpTo("onboarding") { inclusive = true } }
+                        nav.navigate("settings?section=Model")
+                    },
                     onDone = {
                         // Optional 增强能力 step (Shizuku) unless it is already set up.
                         val next = if (shellAccessOf(this@MainActivity).refresh().ready) "home" else "enhance"

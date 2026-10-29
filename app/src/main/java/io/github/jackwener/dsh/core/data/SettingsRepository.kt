@@ -11,6 +11,11 @@ import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.github.jackwener.dsh.core.model.PermissionPreset
 import io.github.jackwener.dsh.core.model.ToolGroup
+import io.github.jackwener.dsh.core.provider.ModelChoice
+import io.github.jackwener.dsh.core.provider.ProviderConfig
+import io.github.jackwener.dsh.core.provider.resolveChoice
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -37,6 +42,8 @@ enum class Effort(val id: String, val label: String) {
 }
 
 data class Settings(
+    /** Selected route: "" = DeepSeek (key or account), else a third-party provider's route id ([providers]). */
+    val provider: String = "",
     val model: String = DEFAULT_MODEL,
     val effort: Effort = Effort.High,
     /** Device tool groups the user switched off (everything else is offered to the agent). */
@@ -52,15 +59,24 @@ data class Settings(
     val defaultPreset: PermissionPreset = PermissionPreset.Full,
     /** 允许其他 App 调用: whether the exported RUN_TASK entry accepts tasks from other apps. Off by default. */
     val allowExternalApps: Boolean = false,
+    /** Third-party OpenAI-compatible providers (keys live in SecretStore, never here). */
+    val providers: List<ProviderConfig> = emptyList(),
 ) {
     val enabledGroups: Set<ToolGroup> get() = ToolGroup.entries.toSet() - disabledGroups
+    /** The effective selection (falls back to DeepSeek when the provider/model is gone or disabled). */
+    val choice: ModelChoice get() = resolveChoice(provider, model, providers)
 
     companion object { const val DEFAULT_MODEL = "deepseek-flash" }
 }
 
+private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+private val providerList = ListSerializer(ProviderConfig.serializer())
+
 @Singleton
 class SettingsRepository @Inject constructor(@ApplicationContext private val context: Context) {
     private object K {
+        val provider = stringPreferencesKey("provider")
+        val providers = stringPreferencesKey("providers_json")
         val model = stringPreferencesKey("model")
         val effort = stringPreferencesKey("effort")
         val disabledGroups = stringSetPreferencesKey("disabled_groups")
@@ -80,6 +96,8 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
     suspend fun current(): Settings = settings.first()
 
     private fun Preferences.toSettings() = Settings(
+        provider = this[K.provider] ?: "",
+        providers = this[K.providers]?.let { runCatching { json.decodeFromString(providerList, it) }.getOrNull() } ?: emptyList(),
         model = this[K.model] ?: Settings.DEFAULT_MODEL,
         effort = Effort.of(this[K.effort]),
         disabledGroups = this[K.disabledGroups]?.mapNotNull(ToolGroup::of)?.toSet() ?: DEFAULT_DISABLED,
@@ -94,7 +112,18 @@ class SettingsRepository @Inject constructor(@ApplicationContext private val con
         allowExternalApps = this[K.externalApps] ?: false,
     )
 
-    suspend fun setModel(model: String) = context.store.edit { it[K.model] = model }
+    /** [provider] "" = DeepSeek. */
+    suspend fun setModel(provider: String, model: String) = context.store.edit { it[K.provider] = provider; it[K.model] = model }
+    suspend fun saveProvider(p: ProviderConfig) = context.store.edit {
+        val cur = it[K.providers]?.let { s -> runCatching { json.decodeFromString(providerList, s) }.getOrNull() } ?: emptyList()
+        val next = if (cur.any { c -> c.id == p.id }) cur.map { c -> if (c.id == p.id) p else c } else cur + p
+        it[K.providers] = json.encodeToString(providerList, next)
+    }
+    suspend fun deleteProvider(id: String) = context.store.edit {
+        val cur = it[K.providers]?.let { s -> runCatching { json.decodeFromString(providerList, s) }.getOrNull() } ?: emptyList()
+        it[K.providers] = json.encodeToString(providerList, cur.filter { c -> c.id != id })
+        if (it[K.provider] == id) { it[K.provider] = ""; it[K.model] = Settings.DEFAULT_MODEL }
+    }
     suspend fun setEffort(effort: Effort) = context.store.edit { it[K.effort] = effort.id }
     suspend fun setGroupEnabled(group: ToolGroup, enabled: Boolean) = context.store.edit {
         val cur = it[K.disabledGroups] ?: DEFAULT_DISABLED.map { g -> g.id }.toSet()

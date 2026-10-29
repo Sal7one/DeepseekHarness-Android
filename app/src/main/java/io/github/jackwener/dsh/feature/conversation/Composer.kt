@@ -65,6 +65,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.jackwener.dsh.R
 import io.github.jackwener.dsh.core.data.Effort
+import io.github.jackwener.dsh.core.provider.DEEPSEEK_MODELS
+import io.github.jackwener.dsh.core.provider.ModelChoice
+import io.github.jackwener.dsh.core.provider.ProviderConfig
 import io.github.jackwener.dsh.core.designsystem.Chevron
 import io.github.jackwener.dsh.core.designsystem.DIcon
 import io.github.jackwener.dsh.core.designsystem.DMenu
@@ -142,10 +145,9 @@ fun rememberSettled(ms: Long = 600): () -> Boolean {
     return { android.os.SystemClock.uptimeMillis() - since >= ms }
 }
 
-/** Model catalog shown by the model chip (dsh ui-model-selection). */
-val Models = listOf("deepseek-flash" to "DeepSeek-V4.1-Flash", "deepseek-v4-pro" to "DeepSeek-V4-Pro")
+/** DeepSeek models shown by the model chip (dsh ui-model-selection); third-party ones come from Settings.providers. */
+val Models = DEEPSEEK_MODELS
 fun modelLabel(id: String) = Models.firstOrNull { it.first == id }?.second ?: id
-const val CONTEXT_WINDOW = 1_000_000L
 
 object PresetUi {
     @DrawableRes fun icon(p: PermissionPreset) = when (p) {
@@ -182,9 +184,12 @@ fun Composer(
     running: Boolean,
     preset: PermissionPreset,
     onPreset: (PermissionPreset) -> Unit,
-    model: String,
+    model: ModelChoice,
+    /** Third-party providers; their enabled models are listed under the provider's name. */
+    providers: List<ProviderConfig>,
     effort: Effort,
-    onModel: (String) -> Unit,
+    /** (provider route id or "" for DeepSeek, model id). */
+    onModel: (String, String) -> Unit,
     onEffort: (Effort) -> Unit,
     contextTokens: Long,
     onSend: () -> Unit,
@@ -307,23 +312,34 @@ fun Composer(
                 }
             }
             Spacer(Modifier.weight(1f))
-            if (showChips && contextTokens > 0) ContextRing(contextTokens)
+            if (showChips && contextTokens > 0) ContextRing(contextTokens, model.contextWindow)
             if (showChips) Box {
-                val modelDesc = stringResource(R.string.model_chip_desc, modelLabel(model), effort.label)
+                // Third-party models have no effort selector (the model family's default level applies).
+                val effortLabel = if (model.isDeepSeek) effort.label else ""
+                val modelDesc = stringResource(R.string.model_chip_desc, modelLabel(model.model), effortLabel)
                 Row(Modifier.heightIn(min = 28.dp).widthIn(max = 200.dp).clip(Radius.sm).pressable({ if (settled()) modelOpen = true }, Radius.sm)
                     .semantics(mergeDescendants = true) { contentDescription = modelDesc }.padding(start = 6.dp, end = 2.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text(modelLabel(model).removePrefix("DeepSeek-"), Modifier.weight(1f, fill = false), style = DshType.xs13m, color = c.labelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.width(4.dp))
-                    Text(effort.label, style = DshType.xs13m, color = c.labelCaption, maxLines = 1)
+                    Text(modelLabel(model.model).removePrefix("DeepSeek-"), Modifier.weight(1f, fill = false), style = DshType.xs13m, color = c.labelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (effortLabel.isNotEmpty()) {
+                        Spacer(Modifier.width(4.dp))
+                        Text(effortLabel, style = DshType.xs13m, color = c.labelCaption, maxLines = 1)
+                    }
                     Chevron(Modifier.padding(start = 2.dp), size = 12.dp)
                 }
                 DMenu(modelOpen, { modelOpen = false }) {
-                    MenuSectionTitle(stringResource(R.string.model))
-                    Models.forEach { (id, label) -> MenuItem(label, { modelOpen = false; onModel(id) }, R.drawable.dsw_data_outline, selected = id == model) }
-                    MenuDivider()
-                    MenuSectionTitle(stringResource(R.string.effort))
-                    Effort.entries.forEach { e -> MenuItem(e.label, { modelOpen = false; onEffort(e) }, null, stringResource(effortDesc(e)), selected = e == effort) }
+                    MenuSectionTitle("DeepSeek")
+                    Models.forEach { (id, label) -> MenuItem(label, { modelOpen = false; onModel("", id) }, R.drawable.dsw_data_outline, selected = model.isDeepSeek && id == model.model) }
+                    providers.filter { it.enabled && it.models.isNotEmpty() }.forEach { p ->
+                        MenuDivider()
+                        MenuSectionTitle(p.name)
+                        p.models.forEach { m -> MenuItem(m, { modelOpen = false; onModel(p.id, m) }, R.drawable.dsw_data_outline, selected = model.provider?.id == p.id && model.model == m) }
+                    }
+                    if (model.isDeepSeek) {
+                        MenuDivider()
+                        MenuSectionTitle(stringResource(R.string.effort))
+                        Effort.entries.forEach { e -> MenuItem(e.label, { modelOpen = false; onEffort(e) }, null, stringResource(effortDesc(e)), selected = e == effort) }
+                    }
                     if (modelChangePending) Text(stringResource(R.string.model_applies_next), Modifier.padding(8.dp), style = DshType.xxs12, color = c.labelCaption)
                 }
             }
@@ -385,10 +401,10 @@ fun SendButton(running: Boolean, empty: Boolean, onSend: () -> Unit, onStop: () 
 
 /** dsh ContextMeter: 14 dp ring + percentage; tap for the occupancy panel. */
 @Composable
-fun ContextRing(tokens: Long) {
+fun ContextRing(tokens: Long, window: Long) {
     val c = Dsh.colors
     var open by remember { mutableStateOf(false) }
-    val frac = (tokens.toFloat() / CONTEXT_WINDOW).coerceIn(0f, 1f)
+    val frac = (tokens.toFloat() / window).coerceIn(0f, 1f)
     val pct = (frac * 100).toInt().coerceAtLeast(if (tokens > 0) 1 else 0)
     Box {
         Row(Modifier.height(28.dp).clip(Radius.sm).pressable({ open = true }, Radius.sm).padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -407,7 +423,7 @@ fun ContextRing(tokens: Long) {
                     Text(stringResource(R.string.context_used), style = DshType.xs13, color = c.labelSecondary)
                     Text(" $pct%", style = DshType.xs13.copy(fontWeight = FontWeight(600)), color = c.labelPrimary)
                     Spacer(Modifier.weight(1f))
-                    Text("~${Fmt.tokens(tokens)} / ${Fmt.tokens(CONTEXT_WINDOW)}", style = DshType.xxs12, color = c.labelTertiary)
+                    Text("~${Fmt.tokens(tokens)} / ${Fmt.tokens(window)}", style = DshType.xxs12, color = c.labelTertiary)
                 }
                 Box(Modifier.fillMaxWidth().height(4.dp).clip(CircleShape).background(c.borderL2)) {
                     Box(Modifier.fillMaxWidth(frac).height(4.dp).clip(CircleShape).background(c.kindMessages))

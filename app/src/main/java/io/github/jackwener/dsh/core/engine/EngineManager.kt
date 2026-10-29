@@ -14,6 +14,7 @@ import io.github.jackwener.dsh.core.account.AccountRepository
 import io.github.jackwener.dsh.core.capability.CapabilityHub
 import io.github.jackwener.dsh.core.data.SecretStore
 import io.github.jackwener.dsh.core.data.SettingsRepository
+import io.github.jackwener.dsh.core.provider.renderProfilePatch
 import io.github.jackwener.dsh.core.session.SessionStore
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -53,8 +54,14 @@ class EngineStartException(message: String, val log: String?, cause: Throwable) 
 /** Android refused to start the engine's foreground service from the background (Android 12+). */
 class EngineBackgroundStartException(cause: Throwable) : Exception("foreground service start not allowed from the background", cause)
 
-/** The process-wide SDK route (`initialize`): provider + model + effort ([effort] is the Effort id). */
+/**
+ * The process-wide SDK route (`initialize`): provider + model + effort ([effort] is the Effort id;
+ * "" for third-party routes, which use the model family's own default and send none).
+ */
 data class EngineRoute(val provider: String, val model: String, val effort: String)
+
+/** The selected third-party route could not be initialized (engine fell back to DeepSeek). */
+class RouteUnavailableException(message: String) : Exception(message)
 
 /**
  * Owns the `:engine` process from the app side: starts it on demand, wires the SDK and capability
@@ -64,6 +71,12 @@ data class EngineRoute(val provider: String, val model: String, val effort: Stri
  * login (held by the engine itself). Precedence mirrors dsh's `initializeDefaultModel`: the account
  * route `deepseek-account` is used only when no API key is configured; otherwise
  * `deepseek-official`. The engine starts without either, because account login runs inside it.
+ *
+ * Third-party providers (Settings → 模型服务): the app writes the user patch layer
+ * `$DSH_HOME/profiles/android/cordis.patch.yml` (llm-service-lite providers, see
+ * core/provider/Providers.kt) before each start and passes each provider key as
+ * `DSH_ANDROID_KEY_<ID>`. Both are read once at process start, so a change to either (the
+ * [profileFingerprint]) restarts the engine when it is idle, like a route change.
  */
 @Singleton
 class EngineManager @Inject constructor(
@@ -108,8 +121,32 @@ class EngineManager @Inject constructor(
     /** Backoff + circuit breaker for unexpected engine exits (see RestartPolicy). */
     val restarts = RestartPolicy()
 
-    private fun wantedRoute(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean) =
-        EngineRoute(if (!hasKey && account.get().signedIn) "deepseek-account" else "deepseek-official", st.model, st.effort.id)
+    private fun wantedRoute(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean): EngineRoute {
+        val choice = st.choice
+        choice.provider?.let { return EngineRoute(it.id, choice.model, "") }
+        return EngineRoute(if (!hasKey && account.get().signedIn) "deepseek-account" else "deepseek-official", choice.model, st.effort.id)
+    }
+
+    /** web_search needs a DeepSeek credential: the API key, or the account while on the account route. */
+    private fun webSearch(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean) = hasKey || st.choice.isDeepSeek
+
+    private fun profilePatch(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean) =
+        renderProfilePatch(st.providers, webSearch(st, hasKey))
+
+    /** Provider keys for the engine environment (env var name → key). */
+    private fun providerKeys(st: io.github.jackwener.dsh.core.data.Settings): Map<String, String> =
+        st.providers.filter { it.enabled && it.hasKey }.mapNotNull { p -> secrets.read(p.secretName)?.let { p.keyEnv to it } }.toMap()
+
+    /** What a running process has baked in at start: the patch layer and the provider keys (hashed, never stored). */
+    private fun profileFingerprint(st: io.github.jackwener.dsh.core.data.Settings, hasKey: Boolean): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        md.update(profilePatch(st, hasKey).toByteArray())
+        providerKeys(st).toSortedMap().forEach { (k, v) -> md.update("$k=$v\n".toByteArray()) }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+    @Volatile private var activeFingerprint: String? = null
+    /** A third-party route that failed to initialize in this generation, and why. */
+    @Volatile private var failedRoute: Pair<EngineRoute, String>? = null
 
     /**
      * Returns a ready SDK peer for prompts, starting the engine if needed. The route is
@@ -132,14 +169,21 @@ class EngineManager @Inject constructor(
                 sessions.get().hasEngineRuns() -> peer
                 // The device time zone changed since start: a new process picks it up (when idle, like a route change).
                 TimeZone.getDefault().id != startedTz -> { Log.i(TAG, "time zone changed: restarting engine"); shutdownLocked(); null }
+                // Providers / keys / web search changed: only a new process reads them.
+                profileFingerprint(st, hasKey) != activeFingerprint -> { Log.i(TAG, "model providers changed: restarting engine"); shutdownLocked(); null }
                 want == activeRoute -> peer
+                // This process already failed that route with the same configuration: report it (below) without churning.
+                want == failedRoute?.first -> peer
                 !sessionsOpened -> runCatching { initialize(peer, want); peer }.getOrElse {
                     Log.w(TAG, "re-initialize failed; restarting", it); shutdownLocked(); null
                 }
                 else -> { Log.i(TAG, "route changed: restarting engine"); shutdownLocked(); null }
             }
         } ?: startLocked(st, hasKey)
-        if (!hasKey && !account.get().signedIn) throw NoCredentialsException()
+        val want = wantedRoute(st, hasKey)
+        if (want != activeRoute && !st.choice.isDeepSeek && !sessions.get().hasEngineRuns())
+            throw RouteUnavailableException("${st.choice.provider?.name ?: want.provider} / ${want.model}: ${failedRoute?.second ?: "unavailable"}")
+        if (st.choice.isDeepSeek && !hasKey && !account.get().signedIn) throw NoCredentialsException()
         peer
     }
 
@@ -157,7 +201,7 @@ class EngineManager @Inject constructor(
                 put("cwd", File(context.filesDir, "home").path)
                 put("provider", route.provider)
                 put("model", route.model)
-                put("reasoningEffort", route.effort)
+                if (route.effort.isNotEmpty()) put("reasoningEffort", route.effort)
                 put("approvalRequests", true)
                 putJsonObject("capabilities") { put("userQuestions", true) }
             })
@@ -183,7 +227,9 @@ class EngineManager @Inject constructor(
                 service = bind(gen)
             }
             val tBound = System.currentTimeMillis()
-            val handles = withContext(Dispatchers.IO) { service.start(environment(secrets.read())) }
+            val fingerprint = profileFingerprint(st, hasKey)
+            withContext(Dispatchers.IO) { writeProfilePatch(profilePatch(st, hasKey)) }
+            val handles = withContext(Dispatchers.IO) { service.start(environment(secrets.read(), providerKeys(st))) }
             val sdkIn = ParcelFileDescriptor.AutoCloseOutputStream(handles.pfd("sdk_in"))
             val sdkOut = ParcelFileDescriptor.AutoCloseInputStream(handles.pfd("sdk_out"))
             val bridgeFd = handles.pfd("bridge")
@@ -205,7 +251,18 @@ class EngineManager @Inject constructor(
                 .onSuccess { account.get().onEngineView(it) }
                 .onFailure { Log.w(TAG, "account/state unavailable", it) }
             val tBooted = System.currentTimeMillis()
-            initialize(peer, wantedRoute(st, hasKey))
+            val want = wantedRoute(st, hasKey)
+            failedRoute = null
+            try {
+                initialize(peer, want)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException || st.choice.isDeepSeek) throw e
+                // A broken third-party route must not take the engine (account login, DeepSeek) down.
+                Log.w(TAG, "third-party route ${want.provider}/${want.model} failed; falling back to DeepSeek", e)
+                failedRoute = want to (e.message ?: e.javaClass.simpleName)
+                initialize(peer, EngineRoute(if (!hasKey && account.get().signedIn) "deepseek-account" else "deepseek-official", io.github.jackwener.dsh.core.provider.DEFAULT_DEEPSEEK_MODEL, st.effort.id))
+            }
+            activeFingerprint = fingerprint
             sdk = peer; bridge = bridgePeer
             generation = gen
             capabilities.get().attach(bridgePeer)
@@ -342,7 +399,17 @@ class EngineManager @Inject constructor(
         return withTimeout(20_000) { deferred.await() }
     }
 
-    private fun environment(apiKey: String?) = Bundle().apply {
+    /** The user patch layer dsh reads at boot (ENGINE-CONTRACT §1.1); written atomically, only when it changed. */
+    private fun writeProfilePatch(text: String) {
+        val dir = File(context.filesDir, "dsh-home/profiles/android").apply { mkdirs() }
+        val f = File(dir, "cordis.patch.yml")
+        if (f.exists() && f.readText() == text) return
+        val tmp = File(dir, "cordis.patch.yml.tmp")
+        tmp.writeText(text)
+        check(tmp.renameTo(f)) { "could not write ${f.path}" }
+    }
+
+    private fun environment(apiKey: String?, providerKeys: Map<String, String>) = Bundle().apply {
         startedTz = TimeZone.getDefault().id
         val files = context.filesDir
         putString("DSH_HOME", File(files, "dsh-home").path)
@@ -352,6 +419,7 @@ class EngineManager @Inject constructor(
         putString("PATH", "${File(files, "bin").path}:/system/bin:/system/xbin")
         putString("DSH_NATIVE_DIR", context.applicationInfo.nativeLibraryDir)
         apiKey?.let { putString("DEEPSEEK_API_KEY", it) }
+        providerKeys.forEach { (env, key) -> putString(env, key) }
         putString("DSH_ANDROID_PACKAGE", context.packageName)
         putString("DSH_ANDROID_LOCALE", Locale.getDefault().toLanguageTag())
         // Node otherwise runs in UTC (local time for the model, daily budget at local midnight).

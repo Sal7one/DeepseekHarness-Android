@@ -21,6 +21,7 @@ import io.github.jackwener.dsh.core.data.UsageEntity
 import io.github.jackwener.dsh.core.engine.EngineManager
 import io.github.jackwener.dsh.core.engine.EngineState
 import io.github.jackwener.dsh.core.model.ToolGroup
+import io.github.jackwener.dsh.core.provider.ProviderConfig
 import io.github.jackwener.dsh.core.platform.ShizukuShell
 import io.github.jackwener.dsh.service.FloatingBallService
 import kotlinx.coroutines.Dispatchers
@@ -62,7 +63,28 @@ class SettingsViewModel @Inject constructor(
     val maskedKey get() = secrets.read()?.let { it.take(5) + "…" + it.takeLast(4) }
 
     fun setGroup(g: ToolGroup, on: Boolean) = viewModelScope.launch { repo.setGroupEnabled(g, on) }
-    fun setModel(m: String) = viewModelScope.launch { repo.setModel(m) }
+    /** [provider] "" = DeepSeek. */
+    fun setModel(provider: String, m: String) = viewModelScope.launch { repo.setModel(provider, m) }
+
+    // ── third-party providers ──
+    // Saving changes the engine's patch layer / key environment: the engine picks it up on its next
+    // idle restart (EngineManager.profileFingerprint), so nothing running is interrupted here.
+    /** Saves [p]; a non-blank [key] replaces the stored key (Keystore-encrypted, never in settings). */
+    suspend fun saveProvider(p: ProviderConfig, key: String?) {
+        val k = key?.trim().orEmpty()
+        withContext(Dispatchers.IO) { if (k.isNotEmpty()) secrets.write(p.secretName, k) }
+        repo.saveProvider(p.copy(hasKey = p.hasKey || k.isNotEmpty()))
+    }
+    fun deleteProvider(p: ProviderConfig) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { secrets.clear(p.secretName) }
+        repo.deleteProvider(p.id)
+    }
+    fun setProviderEnabled(p: ProviderConfig, on: Boolean) = viewModelScope.launch { repo.saveProvider(p.copy(enabled = on)) }
+    /** `GET {baseUrl}/models` with [key] (or the stored key of [existing]); also the connection test. */
+    suspend fun fetchModels(baseUrl: String, key: String?, existing: ProviderConfig?): Result<List<String>> = withContext(Dispatchers.IO) {
+        val k = key?.trim()?.takeIf { it.isNotEmpty() } ?: existing?.takeIf { it.hasKey }?.let { secrets.read(it.secretName) }
+        io.github.jackwener.dsh.core.provider.fetchModels(baseUrl, k)
+    }
     fun setEffort(e: Effort) = viewModelScope.launch { repo.setEffort(e) }
     fun setTheme(t: ThemeMode) = viewModelScope.launch { repo.setTheme(t) }
     fun setWorkDetails(w: WorkDetails) = viewModelScope.launch { repo.setWorkDetails(w) }
@@ -114,7 +136,9 @@ class SettingsViewModel @Inject constructor(
         checks += DoctorCheck("Shizuku", if (shell == io.github.jackwener.dsh.core.platform.ShellState.NotInstalled) null else shell.ready,
             shellStateLabel(context, shell), shellFixIntent(shizuku.access, shell, shizukuInstaller.bundled))
         val signedIn = account.signedIn
-        checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn, when {
+        val third = settings.value.choice.provider
+        checks += DoctorCheck(if (zh) "模型凭据" else "Model credential", hasKey || signedIn || third != null, when {
+            third != null -> third.name + " / " + settings.value.choice.model
             hasKey -> "API Key " + (maskedKey ?: "")
             signedIn -> if (zh) "DeepSeek 账号" else "DeepSeek account"
             else -> if (zh) "未登录，也未设置 API Key" else "Not signed in, no API key"

@@ -70,7 +70,12 @@ open class ConversationController(
      * from the running engine's route for that reason; the composer says the change applies later.
      */
     val modelChangePending: StateFlow<Boolean> = combine(engine.route, settings, store.status) { route, st, status ->
-        route != null && (route.model != st.model || route.effort != st.effort.id) && status.values.any { it != RowStatus.Idle }
+        val want = st.choice
+        val differs = route != null && when (val p = want.provider) {
+            null -> !route.provider.startsWith("deepseek-") || route.model != want.model || route.effort != st.effort.id
+            else -> route.provider != p.id || route.model != want.model
+        }
+        differs && status.values.any { it != RowStatus.Idle }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     val conversation: StateFlow<Conversation> = live
@@ -125,7 +130,8 @@ open class ConversationController(
     fun removeQueued(id: String) = store.removeQueued(sessionId.value, id)
     fun sendQueuedNow(id: String) = viewModelScope.launch { store.sendQueuedNow(sessionId.value, id) }
     fun setPreset(p: PermissionPreset) = viewModelScope.launch { store.setPreset(sessionId.value, p) }
-    fun setModel(m: String) = viewModelScope.launch { settingsRepo.setModel(m) }
+    /** [provider] "" = DeepSeek. */
+    fun setModel(provider: String, m: String) = viewModelScope.launch { settingsRepo.setModel(provider, m) }
     fun setEffort(e: Effort) = viewModelScope.launch { settingsRepo.setEffort(e) }
 
     fun inspect(callId: String) { view.value = SessionView.Trajectory; focusRecord.value = "k$callId" }

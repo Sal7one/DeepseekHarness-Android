@@ -191,7 +191,7 @@ fun ComposerSlot(vm: ConversationController, composer: ComposerState, settings: 
         live.approval != null -> ApprovalCard(live.approval) { vm.approve(live.approval, it) }
         live.question != null -> QuestionCard(live.question, onSubmit = { vm.answer(live.question, it) }, onSkip = { vm.skipQuestion(live.question) })
         else -> Composer(
-            composer, live.running, live.preset, vm::setPreset, settings.model, settings.effort, vm::setModel, vm::setEffort, conv.contextTokens,
+            composer, live.running, live.preset, vm::setPreset, settings.choice, settings.providers, settings.effort, vm::setModel, vm::setEffort, conv.contextTokens,
             onSend = {
                 val text = prepare(composer.outgoingText(context))
                 val images = composer.images.map { it.mime to it.base64 }

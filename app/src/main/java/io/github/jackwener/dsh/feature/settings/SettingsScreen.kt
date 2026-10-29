@@ -83,7 +83,6 @@ import io.github.jackwener.dsh.core.designsystem.Tone
 import io.github.jackwener.dsh.core.engine.EngineState
 import io.github.jackwener.dsh.core.model.PermissionPreset
 import io.github.jackwener.dsh.core.model.ToolGroup
-import io.github.jackwener.dsh.feature.conversation.Models
 import io.github.jackwener.dsh.feature.conversation.PresetUi
 import kotlinx.coroutines.launch
 
@@ -117,11 +116,15 @@ fun SettingsScreen(initial: SettingsSection?, onBack: () -> Unit, onNotification
     var section by rememberSaveable { mutableStateOf(initial) }
     val deepLinked = rememberSaveable { initial != null }
     val toIndex = section != null && !deepLinked
+    /** 模型服务 sub-page: [NEW_PROVIDER] or a provider id being edited. */
+    var provider by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(toIndex) { section = null }
+    BackHandler(provider != null) { provider = null }
     Column(Modifier.fillMaxSize().background(c.bgBase).statusBarsPadding()) {
-        DTopBar(section?.let { stringResource(it.label) } ?: stringResource(R.string.settings), { if (toIndex) section = null else onBack() })
+        val title = if (provider != null) stringResource(R.string.prov_title) else section?.let { stringResource(it.label) } ?: stringResource(R.string.settings)
+        DTopBar(title, { if (provider != null) provider = null else if (toIndex) section = null else onBack() })
         // One scroll position per page; IME insets first so focused fields and their buttons stay above the keyboard.
-        val scroll = rememberSaveable(section, saver = androidx.compose.foundation.ScrollState.Saver) { androidx.compose.foundation.ScrollState(0) }
+        val scroll = rememberSaveable(section, provider, saver = androidx.compose.foundation.ScrollState.Saver) { androidx.compose.foundation.ScrollState(0) }
         Column(Modifier.fillMaxSize().imePadding().verticalScroll(scroll).navigationBarsPadding().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
             when (section) {
                 null -> SettingsIndex { section = it }
@@ -131,7 +134,7 @@ fun SettingsScreen(initial: SettingsSection?, onBack: () -> Unit, onNotification
                     io.github.jackwener.dsh.feature.account.AccountSettingsSection(vm.account, usingApiKey = hasKey)
                 }
                 SettingsSection.General -> GeneralSection(vm)
-                SettingsSection.Model -> ModelSection(vm)
+                SettingsSection.Model -> provider?.let { ProviderPage(vm, it) { provider = null } } ?: ModelSection(vm) { provider = it }
                 SettingsSection.Agent -> AgentSection(vm)
                 SettingsSection.Usage -> UsageSection(vm)
                 SettingsSection.Phone -> PhoneSection(vm, onNotificationApps)
@@ -224,7 +227,7 @@ private fun GeneralSection(vm: SettingsViewModel) {
 }
 
 @Composable
-private fun ModelSection(vm: SettingsViewModel) {
+private fun ModelSection(vm: SettingsViewModel, onProvider: (String) -> Unit) {
     val c = Dsh.colors
     val s by vm.settings.collectAsStateWithLifecycle()
     val hasKey by vm.hasKeyFlow.collectAsStateWithLifecycle()
@@ -257,16 +260,8 @@ private fun ModelSection(vm: SettingsViewModel) {
             DButton(stringResource(R.string.apply), { scope.launch { if (vm.saveKey(key) == null) key = "" } }, size = BtnSize.Sm, enabled = key.isNotBlank())
         }
     }
-    SettingsGroupTitle(stringResource(R.string.set_default_model))
-    SettingsCard {
-        Models.forEachIndexed { i, (id, label) ->
-            SettingsRow(label, if (id == "deepseek-flash") stringResource(R.string.model_flash_desc) else stringResource(R.string.model_pro_desc), onClick = { vm.setModel(id) }, divider = i > 0,
-                trailing = { if (s.model == id) DIcon(R.drawable.dsw_check_outline, size = 16.dp, tint = c.labelPrimary) })
-        }
-        SettingsRow(stringResource(R.string.effort), stringResource(R.string.effort_desc), stacked = true) {
-            Segmented(Effort.entries.map { it.label }, s.effort.ordinal, { vm.setEffort(Effort.entries[it]) })
-        }
-    }
+    ProvidersCard(vm, onProvider)
+    DefaultModelCard(vm)
 }
 
 @Composable
@@ -299,7 +294,7 @@ private fun AgentSection(vm: SettingsViewModel) {
             }, size = BtnSize.Sm)
         }
     }
-    WebSection()
+    WebSection(vm)
 }
 
 private fun groupLabel(g: ToolGroup) = when (g) {
@@ -317,10 +312,15 @@ private fun groupLabel(g: ToolGroup) = when (g) {
 }
 
 @Composable
-private fun WebSection() {
+private fun WebSection(vm: SettingsViewModel) {
+    val s by vm.settings.collectAsStateWithLifecycle()
+    val hasKey by vm.hasKeyFlow.collectAsStateWithLifecycle()
+    // Mirrors EngineManager.webSearch: DeepSeek search needs the API key, or the account while a DeepSeek model is in use.
+    val search = hasKey || s.choice.isDeepSeek
     SettingsGroupTitle(stringResource(R.string.set_web_group))
     SettingsCard {
-        SettingsRow(stringResource(R.string.web_search_title), stringResource(R.string.web_search_desc), divider = false, trailing = { Tag(stringResource(R.string.enabled), Tone.Success) })
+        SettingsRow(stringResource(R.string.web_search_title), stringResource(if (search) R.string.web_search_desc else R.string.web_search_off_desc), divider = false,
+            trailing = { if (search) Tag(stringResource(R.string.enabled), Tone.Success) else Tag(stringResource(R.string.web_search_needs_key), Tone.Warn) })
         SettingsRow(stringResource(R.string.web_fetch_title), stringResource(R.string.web_fetch_desc), trailing = { Tag(stringResource(R.string.enabled), Tone.Success) })
     }
 }
@@ -485,7 +485,7 @@ fun NotificationAppsScreen(onBack: () -> Unit, vm: SettingsViewModel = hiltViewM
  * Key (the key card). Straight into the conversation once either exists.
  */
 @Composable
-fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Unit, vm: SettingsViewModel = hiltViewModel()) {
+fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Unit, onThirdParty: () -> Unit = {}, vm: SettingsViewModel = hiltViewModel()) {
     val c = Dsh.colors
     val scope = rememberCoroutineScope()
     val status by vm.keyStatus.collectAsStateWithLifecycle()
@@ -529,7 +529,9 @@ fun Onboarding(showKey: Boolean, onShowKey: (Boolean) -> Unit, onDone: () -> Uni
                 }
             }
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(12.dp))
+        Text(stringResource(R.string.onb_third_party), Modifier.clip(Radius.sm).clickable(onClick = onThirdParty).padding(8.dp), style = DshType.xs13, color = c.link)
+        Spacer(Modifier.height(4.dp))
         Text(stringResource(R.string.onb_disclaimer), style = DshType.xxs12, color = c.labelTertiary, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
