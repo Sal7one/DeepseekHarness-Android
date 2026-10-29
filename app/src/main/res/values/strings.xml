@@ -595,7 +595,8 @@
     <string name="prov_models_count">%1$d 个模型</string>
     <string name="prov_name">名称</string>
     <string name="prov_base_url">接口地址（Base URL）</string>
-    <string name="prov_base_url_hint">OpenAI 兼容地址，通常以 /v1 结尾，仅支持 HTTPS</string>
+    <string name="prov_base_url_hint">OpenAI 兼容地址，通常以 /v1 结尾</string>
+    <string name="prov_http_warning">http 为明文传输，API key 和对话内容可能被同一网络中的人看到，仅建议在自己的局域网内使用</string>
     <string name="prov_key_optional">API Key（可选）</string>
     <string name="prov_key_saved">已保存，留空则保持不变</string>
     <string name="prov_get_key">获取 API Key</string>
@@ -607,7 +608,7 @@
     <string name="prov_add_model">手动输入模型 ID</string>
     <string name="prov_add_model_btn">添加</string>
     <string name="prov_delete">删除服务商</string>
-    <string name="prov_err_url">请填写 https:// 开头的接口地址</string>
+    <string name="prov_err_url">请填写 https:// 或 http:// 开头的接口地址</string>
     <string name="prov_err_key">请填写 API Key</string>
     <string name="prov_err_models">至少勾选一个模型</string>
     <string name="prov_model_desc">使用该模型默认的推理设置</string>

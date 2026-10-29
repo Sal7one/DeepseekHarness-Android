@@ -171,7 +171,7 @@ fun renderProfilePatch(providers: List<ProviderConfig>, webSearch: Boolean): Str
 /**
  * `GET {baseUrl}/models` (OpenAI shape `{data:[{id}]}`, or a bare array / `{models:[…]}`).
  * Doubles as the connection test. Runs on the caller's thread (call from Dispatchers.IO).
- * HTTPS only (network_security_config keeps cleartext off).
+ * https, or http for a user's LAN gateway (network_security_config permits cleartext).
  */
 fun fetchModels(baseUrl: String, key: String?): Result<List<String>> = runCatching {
     val url = URL(baseUrl.trim().trimEnd('/') + "/models")

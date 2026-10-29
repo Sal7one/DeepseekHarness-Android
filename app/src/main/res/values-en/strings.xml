@@ -595,7 +595,8 @@
     <string name="prov_models_count">%1$d models</string>
     <string name="prov_name">Name</string>
     <string name="prov_base_url">Base URL</string>
-    <string name="prov_base_url_hint">OpenAI-compatible, usually ending in /v1; HTTPS only</string>
+    <string name="prov_base_url_hint">OpenAI-compatible, usually ending in /v1</string>
+    <string name="prov_http_warning">http is unencrypted: the API key and conversations can be seen by others on the same network. Use it only on your own LAN.</string>
     <string name="prov_key_optional">API Key (optional)</string>
     <string name="prov_key_saved">Saved; leave empty to keep it</string>
     <string name="prov_get_key">Get an API key</string>
@@ -607,7 +608,7 @@
     <string name="prov_add_model">Type a model ID</string>
     <string name="prov_add_model_btn">Add</string>
     <string name="prov_delete">Delete provider</string>
-    <string name="prov_err_url">Enter an https:// base URL</string>
+    <string name="prov_err_url">Enter a base URL starting with https:// or http://</string>
     <string name="prov_err_key">Enter the API key</string>
     <string name="prov_err_models">Check at least one model</string>
     <string name="prov_model_desc">Uses the model\'s default reasoning settings</string>

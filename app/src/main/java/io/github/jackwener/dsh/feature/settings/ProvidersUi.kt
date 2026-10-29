@@ -153,6 +153,7 @@ private fun ProviderEditor(vm: SettingsViewModel, existing: ProviderConfig?, pre
             Text(stringResource(R.string.prov_base_url), style = DshType.xs13m, color = c.labelSecondary)
             DInput(baseUrl, { baseUrl = it.trim() }, placeholder = "https://…/v1", keyboardType = KeyboardType.Uri)
             Text(stringResource(R.string.prov_base_url_hint), style = DshType.xxs12, color = c.labelTertiary)
+            if (baseUrl.startsWith("http://", ignoreCase = true)) Text(stringResource(R.string.prov_http_warning), style = DshType.xxs12, color = c.error)
             Text(stringResource(if (preset.keyOptional) R.string.prov_key_optional else R.string.api_key_label), style = DshType.xs13m, color = c.labelSecondary)
             DInput(key, { key = it }, placeholder = if (existing?.hasKey == true) stringResource(R.string.prov_key_saved) else "sk-…", secret = true, keyboardType = KeyboardType.Password)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -161,7 +162,7 @@ private fun ProviderEditor(vm: SettingsViewModel, existing: ProviderConfig?, pre
                     runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(keysUrl)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                 }.padding(vertical = 4.dp), style = DshType.xs13, color = c.link) else Spacer(Modifier.weight(1f))
                 DButton(stringResource(R.string.prov_fetch), {
-                    if (!baseUrl.startsWith("https://")) { error = R.string.prov_err_url; return@DButton }
+                    if (!isHttpUrl(baseUrl)) { error = R.string.prov_err_url; return@DButton }
                     fetchState = "busy"
                     scope.launch {
                         vm.fetchModels(baseUrl, key, existing).onSuccess { ids ->
@@ -205,7 +206,7 @@ private fun ProviderEditor(vm: SettingsViewModel, existing: ProviderConfig?, pre
         DButton(stringResource(R.string.cancel), onDone, variant = BtnVariant.Outline, size = BtnSize.Sm)
         DButton(stringResource(R.string.save), {
             error = when {
-                !baseUrl.startsWith("https://") -> R.string.prov_err_url
+                !isHttpUrl(baseUrl) -> R.string.prov_err_url
                 needsKey && key.isBlank() -> R.string.prov_err_key
                 selected.isEmpty() -> R.string.prov_err_models
                 else -> null
@@ -221,3 +222,6 @@ private fun ProviderEditor(vm: SettingsViewModel, existing: ProviderConfig?, pre
         }, size = BtnSize.Sm)
     }
 }
+
+/** https:// for cloud services, or plain http:// for a gateway on the user's own LAN (#5). */
+private fun isHttpUrl(url: String) = url.startsWith("https://", ignoreCase = true) || url.startsWith("http://", ignoreCase = true)
