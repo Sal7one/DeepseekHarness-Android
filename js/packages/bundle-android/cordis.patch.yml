@@ -60,8 +60,8 @@
   disabled: true
 # Cold start: the OTel exporter stack (+ got) and the pi-ai multi-provider adapter (+ openai,
 # Anthropic, Google, Bedrock SDKs) were ~half of all modules loaded at boot (1002 → ~500).
-# Telemetry export is off on the phone and the product is DeepSeek-only (llm-deepseek routes stay).
-# build-engine.sh prunes the provider SDKs only pi-ai reaches.
+# Telemetry export is off on the phone. Third-party models go through the much lighter
+# llm-service-lite row below instead; build-engine.sh prunes the provider SDKs only pi-ai reaches.
 - id: otel
   disabled: true
 - id: llm-pi-ai
@@ -81,6 +81,16 @@
     # from plugin-guard.
     - id: tool-ask-user
       name: '@deepseek-ai/dsh-tool-ask-user'
+
+# ── third-party model providers ─────────────────────────────────────────────
+# @snnh/dsh-llm-service-lite (vendored, MIT): OpenAI-compatible endpoints with no vendor SDK.
+# Dormant (no route) until the app writes this row's `config.providers` into the user layer
+# $DSH_HOME/profiles/android/cordis.patch.yml (ENGINE-CONTRACT §1.1). Keys never appear there:
+# each provider names `apiKeyEnv: DSH_ANDROID_KEY_<ID>`, set in the engine's environment.
+# The row exists only here; the user layer replaces its `config` (patch layers never deep-merge).
+- insert:
+    - id: llm-service-lite
+      name: '@snnh/dsh-llm-service-lite'
 
 # ── DSH-Android plugins ────────────────────────────────────────────────────
 - insert:

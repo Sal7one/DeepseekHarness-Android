@@ -39,24 +39,41 @@ cp "$JS_DIR/engine/package.json" "$JS_DIR/engine/package-lock.json" "$STAGE/"
 (cd "$STAGE" && npm ci --omit=dev --ignore-scripts --no-audit --no-fund --loglevel=error)
 
 # ── 2. our packages, copied (never linked) ───────────────────────────────────
-log "adding @dsh-android packages"
-for pkg in bundle-android plugin-device plugin-guard plugin-account; do
-  src="$JS_DIR/packages/$pkg"
-  dst="$NM/@dsh-android/$pkg"
-  mkdir -p "$dst"
+# js/packages/<dir> → node_modules/<package name>: our @dsh-android packages plus the vendored
+# third-party LLM adapter @snnh/dsh-llm-service-lite (MIT; see its package.json "//vendored").
+log "adding @dsh-android packages + vendored @snnh/dsh-llm-service-lite"
+OUR_PKGS=(bundle-android plugin-device plugin-guard plugin-account llm-service-lite)
+for pkg in "${OUR_PKGS[@]}"; do
   node -e '
-    const [src, dst] = process.argv.slice(1)
+    const [src, nm, stagePkg] = process.argv.slice(1)
     const fs = require("node:fs"), path = require("node:path")
-    for (const f of require(path.join(src, "package.json")).files) fs.copyFileSync(path.join(src, f), path.join(dst, f))
-  ' "$src" "$dst"
+    const manifest = require(path.join(src, "package.json"))
+    const dst = path.join(nm, manifest.name)
+    for (const f of manifest.files) {
+      fs.mkdirSync(path.dirname(path.join(dst, f)), { recursive: true })
+      fs.copyFileSync(path.join(src, f), path.join(dst, f))
+    }
+    // Record it as a dependency of the engine root so npm/dsh resolution sees a consistent tree.
+    const j = JSON.parse(fs.readFileSync(stagePkg, "utf8"))
+    j.dependencies[manifest.name] = manifest.version
+    fs.writeFileSync(stagePkg, JSON.stringify(j, null, 2) + "\n")
+  ' "$JS_DIR/packages/$pkg" "$NM" "$STAGE/package.json"
 done
-# Record them as dependencies of the engine root so npm/dsh resolution sees a consistent tree.
+# The vendored adapter's runtime dependencies must come from the lockfile-pinned tree (no new
+# downloads): each must already be installed at the locked version and satisfy the declared range.
 node -e '
-  const fs = require("node:fs"), p = process.argv[1]
-  const j = JSON.parse(fs.readFileSync(p, "utf8"))
-  for (const n of ["bundle-android", "plugin-device", "plugin-guard", "plugin-account"]) j.dependencies["@dsh-android/" + n] = "0.1.0"
-  fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n")
-' "$STAGE/package.json"
+  const [nm, lockPath] = process.argv.slice(1)
+  const path = require("node:path")
+  const semver = require(path.join(nm, "semver"))
+  const lock = require(lockPath).packages
+  const deps = require(path.join(nm, "@snnh/dsh-llm-service-lite/package.json")).dependencies
+  for (const [name, range] of Object.entries(deps)) {
+    const locked = lock["node_modules/" + name]
+    let have; try { have = require(path.join(nm, name, "package.json")).version } catch {}
+    if (!locked || have !== locked.version || !semver.satisfies(have, range, { includePrerelease: true }))
+      { console.error(`llm-service-lite dependency ${name}@${range}: locked ${locked?.version}, installed ${have}`); process.exit(1) }
+  }
+' "$NM" "$STAGE/package-lock.json" || die "llm-service-lite dependencies not satisfied by the locked tree"
 
 # ── 3. sharp WebAssembly build (attachment images on android; see patch 09) ──
 log "adding @img/sharp-freebsd-wasm32 closure (lockfile-pinned, integrity-checked)"
@@ -150,11 +167,12 @@ grep -q 'promptTimeZone' "$NM/@deepseek-ai/dsh-sdk-jsonrpc-server/lib/index.js" 
 [[ -f "$NM/@deepseek-ai/dsh-time-context/package.json" && -f "$NM/@deepseek-ai/dsh-tool-ask-user/package.json" ]] || die "time-context / ask-user packages missing"
 [[ ! -e "$NM/@earendil-works/pi-ai" && ! -e "$NM/openai" ]] || die "provider SDK prune failed"
 [[ -f "$NM/@img/sharp-wasm32/package.json" ]] || die "sharp wasm build missing"
+[[ -f "$NM/@snnh/dsh-llm-service-lite/lib/index.js" && -f "$NM/eventsource-parser/package.json" ]] || die "llm-service-lite or eventsource-parser missing"
 log "no symlinks; entry point and patches verified"
 
 # ── 8. version, zip, digest, report ──────────────────────────────────────────
 INPUT_HASH=$( (cd "$JS_DIR" && cat engine/package-lock.json patches/*.patch \
-  packages/bundle-android/cordis.patch.yml packages/bundle-android/android-env.cjs packages/*/package.json packages/plugin-*/*.js scripts/*.mjs build-engine.sh) | sha256sum | cut -c1-10)
+  packages/bundle-android/cordis.patch.yml packages/bundle-android/android-env.cjs packages/*/package.json packages/plugin-*/*.js packages/llm-service-lite/lib/index.js scripts/*.mjs build-engine.sh) | sha256sum | cut -c1-10)
 ENGINE_VERSION="${DSH_VERSION}-a${INPUT_HASH}"
 printf '%s\n' "$ENGINE_VERSION" > "$STAGE/engine-version.txt"
 printf '%s\n' "$ENGINE_VERSION" > "$OUT_DIR/engine-version.txt"

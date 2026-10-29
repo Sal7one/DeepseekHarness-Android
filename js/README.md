@@ -1,7 +1,7 @@
 # js/ — the engine package
 
 DeepSeek Harness (dsh) **0.2.1-rc.2**, installed unmodified from npm and customized only by a dsh bundle (profile
-`android`), three plugins and a few patches applied at build time. The app side of the interface is
+`android`), three plugins, one vendored third-party LLM adapter and a few patches applied at build time. The app side of the interface is
 [`../docs/ENGINE-CONTRACT.md`](../docs/ENGINE-CONTRACT.md).
 
 ## Layout
@@ -13,6 +13,7 @@ DeepSeek Harness (dsh) **0.2.1-rc.2**, installed unmodified from npm and customi
 | `packages/plugin-device/` | capability bridge client (`DSH_BRIDGE_FD`) → dynamic dsh tools |
 | `packages/plugin-guard/` | hardline shell floor, approval policy, budgets, phone system prompt |
 | `packages/plugin-account/` | DeepSeek account login: loopback OAuth callback server + `account/*` SDK methods |
+| `packages/llm-service-lite/` | vendored `@snnh/dsh-llm-service-lite` 0.2.1 (MIT, snnh): third-party OpenAI-compatible model routes; built `lib/index.js` copied verbatim from the npm tarball (provenance in its `package.json` `//vendored`), Web client dropped. Upgrade = replace `lib/index.js` + note |
 | `patches/*.patch` | unified diffs against `node_modules/`, applied in order with `patch -p1` (dry-run first) |
 | `scripts/fetch-locked.mjs` | installs lockfile-pinned packages `npm ci` skips on the host (sharp's WebAssembly build), sha512-verified |
 | `scripts/unreachable.mjs` | lists packages reachable only through given deps (used to prune pi-ai's provider SDKs) |
@@ -22,7 +23,7 @@ DeepSeek Harness (dsh) **0.2.1-rc.2**, installed unmodified from npm and customi
 | `test/host-e2e.mjs` | host end-to-end run of the built `engine.zip` with a fake bridge |
 | `test/host-ac8-resume.mjs` | host repro of engine kill + `session/resume` + continuation |
 
-The packages are plain ESM with no dependencies outside `node:` built-ins; there is no compile step.
+Our packages are plain ESM with no dependencies outside `node:` built-ins; there is no compile step (the vendored adapter is shipped as built upstream).
 
 ## Build
 
@@ -46,7 +47,9 @@ Steps:
 1. `npm ci --omit=dev --ignore-scripts` in a copy of `engine/` (flat hoisted layout). `overrides: {zod: 4.4.3}`: dsh
    pins zod exactly in ~60 packages; without the override npm nests ~50 copies (~250 MiB). Install scripts are not
    needed (node-pty/koffi only pick prebuilds, which are pruned).
-2. Copy the four `@dsh-android/*` packages into `node_modules/` (copies, not links) and add them to the root `package.json`.
+2. Copy the four `@dsh-android/*` packages and the vendored `@snnh/dsh-llm-service-lite` into `node_modules/` (copies,
+   not links) and add them to the root `package.json`. The adapter's dependencies (`eventsource-parser`, cosmokit,
+   schemastery, dsh-util-values) must already be installed from the lockfile at versions satisfying its ranges.
 3. Add `@img/sharp-freebsd-wasm32`, `@img/sharp-wasm32`, `@emnapi/runtime`, `tslib` at their lockfile versions (patch 09).
 4. Save the host's native bindings to `$WORK_DIR/host-native/libdsh_*.so` (tests only, never zipped).
 5. Apply `patches/*.patch`; fail on rejects or fuzz.
