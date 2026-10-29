@@ -297,9 +297,9 @@ fun Composer(
                 }
             }
             if (showChips) Box {
-                // Full access always shows its label (in the warn tone) so the mode is never icon-only.
+                // Full access is marked by the warn tone; on narrow screens every mode is icon-only.
                 val full = preset == PermissionPreset.Full
-                Chip(PresetUi.icon(preset), if (narrow && !full) null else stringResource(PresetUi.label(preset)), { if (settled()) presetOpen = true },
+                Chip(PresetUi.icon(preset), if (narrow) null else stringResource(PresetUi.label(preset)), { if (settled()) presetOpen = true },
                     description = stringResource(R.string.permission_chip_desc, stringResource(PresetUi.label(preset))),
                     tint = if (full) c.warnLabel else c.labelSecondary, background = if (full) c.warnTertiary else Color.Transparent)
                 DMenu(presetOpen, { presetOpen = false }) {
@@ -311,9 +311,10 @@ fun Composer(
                     }
                 }
             }
-            Spacer(Modifier.weight(1f))
+            // The context ring and model chip take only the space left, so Send always stays on screen.
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End)) {
             if (showChips && contextTokens > 0) ContextRing(contextTokens, model.contextWindow)
-            if (showChips) Box {
+            if (showChips) Box(Modifier.weight(1f, fill = false)) {
                 // Third-party models have no effort selector (the model family's default level applies).
                 val effortLabel = if (model.isDeepSeek) effort.label else ""
                 val modelDesc = stringResource(R.string.model_chip_desc, modelLabel(model.model), effortLabel)
@@ -342,6 +343,7 @@ fun Composer(
                     }
                     if (modelChangePending) Text(stringResource(R.string.model_applies_next), Modifier.padding(8.dp), style = DshType.xxs12, color = c.labelCaption)
                 }
+            }
             }
             SendButton(running, state.isEmpty && !canSendEmpty, {
                 if (state.pending > 0) android.widget.Toast.makeText(context, R.string.attachments_loading, android.widget.Toast.LENGTH_SHORT).show()
