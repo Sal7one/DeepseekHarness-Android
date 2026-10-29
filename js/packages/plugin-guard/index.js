@@ -4,8 +4,8 @@
 //     `ctx.tools.guard` backstop that no listener can bypass).
 //  2. Approvals. Android runs without an OS sandbox, so mutating built-ins ask;
 //     to keep friction low the guard auto-allows read-only shell commands and
-//     file writes inside the app's own HOME/TMPDIR, asks only once per
-//     conversation for each `sensitive` device read, applies the conversation's
+//     file writes inside the app's own HOME/TMPDIR, never asks for `sensitive`
+//     device reads in a conversation, applies the conversation's
 //     permission preset (`android/session/permission`, 仅可查看 refuses up front),
 //     and resolves every `ask` itself so a refusal tells the model why.
 //  3. Token / cost budgets from the bridge's `budget/update`, metered from the
@@ -261,8 +261,6 @@ export function apply(ctx, config = {}) {
   let budget = {}
   /** root session id → permission preset (from the app; unknown until it says). */
   const presets = new Map()
-  /** root session id → sensitive device tools the user approved in that conversation. */
-  const grants = new Map()
   /** Whether the app reports permission modes at all (HOME writes are only auto-allowed then). */
   let presetsReported = false
 
@@ -329,10 +327,10 @@ export function apply(ctx, config = {}) {
   }
 
   /** Resolve an `ask` through dsh's approval service here, so a refusal can say why. */
-  const resolveAsk = async (exec, ask, { root, unattended, preset, sensitive }) => {
+  const resolveAsk = async (exec, ask, { root, unattended, preset }) => {
     const approval = ctx.get('approval')
     if (approval === undefined || exec.agent === undefined) return ask // dsh's own degrade path
-    const reason = sensitive && !unattended ? `${ask.reason ?? exec.name} (approving lets this tool read again without asking for the rest of this conversation)` : ask.reason
+    const reason = ask.reason
     const outcome = await approval.request({
       agent: exec.agent,
       toolName: exec.name,
@@ -343,11 +341,6 @@ export function apply(ctx, config = {}) {
     })
     switch (outcome) {
       case 'allowed-once':
-        if (sensitive && !unattended && root !== undefined) {
-          const set = grants.get(root) ?? new Set()
-          set.add(exec.name)
-          remember(grants, root, set)
-        }
         return { kind: 'allow' }
       case 'rejected':
         return { kind: 'deny', reason: rejectionText(exec.name, { unattended, preset: presets.get(root) ?? preset }) }
@@ -375,10 +368,11 @@ export function apply(ctx, config = {}) {
       if (autoAllowed(exec, preset, unattended)) return decision
       ask = { kind: 'ask', reason: `${exec.name}: ${argText(exec.arguments)}` }
     } else return decision
-    if (preset === PRESETS.readOnly) return { kind: 'deny', reason: readOnlyRefusal(exec.name) }
     const sensitive = bridge()?.descriptorOf?.(exec.name)?.risk === 'sensitive'
-    if (sensitive && !unattended && grants.get(root)?.has(exec.name)) return { kind: 'allow' }
-    return resolveAsk(exec, ask, { root, unattended, preset, sensitive })
+    // Reading the phone's own data (location, notifications, …) never asks in a conversation.
+    if (sensitive && !unattended) return { kind: 'allow' }
+    if (preset === PRESETS.readOnly) return { kind: 'deny', reason: readOnlyRefusal(exec.name) }
+    return resolveAsk(exec, ask, { root, unattended, preset })
   }, { prepend: true })
   // Backstop: guards run after every pre-execute decision and cannot be overridden.
   if (typeof ctx.tools.guard === 'function') {

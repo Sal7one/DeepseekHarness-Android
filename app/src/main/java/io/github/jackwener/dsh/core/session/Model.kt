@@ -83,7 +83,7 @@ data class SessionLive(
     val queue: List<QueuedMessage> = emptyList(),
     /** Queued messages handed back to the composer after the run ended without sending them (stop / failure). */
     val restoredDraft: String? = null,
-    val preset: PermissionPreset = PermissionPreset.Ask,
+    val preset: PermissionPreset = PermissionPreset.Full,
     val exists: Boolean = false,
 ) {
     val hasPendingRequest: Boolean get() = approvals.isNotEmpty() || questions.isNotEmpty() || permissions.isNotEmpty() || takeovers.isNotEmpty()

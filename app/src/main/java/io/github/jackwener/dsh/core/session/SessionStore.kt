@@ -500,8 +500,10 @@ class SessionStore @Inject constructor(
         android.util.Log.i(TAG, "approval $tool (risk $risk) for $sessionId (from ${p.s("sessionId")}), preset ${live.preset.id}")
         when (live.preset) {
             PermissionPreset.ReadOnly -> return "rejected"
-            PermissionPreset.Full -> if (risk != Risk.dangerous) return "allowed-once"
-            PermissionPreset.Ask -> {}
+            // Full access asks only before messaging other people (SMS, notification replies).
+            PermissionPreset.Full -> if (tool !in OUTWARD_TOOLS) return "allowed-once"
+            // Reading the phone's own data (location, notifications, …) never asks.
+            PermissionPreset.Ask -> if (risk == Risk.sensitive || risk == Risk.read) return "allowed-once"
         }
         if (sessionGrants[sessionId]?.contains(tool) == true && risk != Risk.dangerous) return "allowed-once"
         val key = UUID.randomUUID().toString()
@@ -753,6 +755,8 @@ class SessionStore @Inject constructor(
     private companion object {
         const val TAG = "SessionStore"
         const val RESUME_RETRY_MS = 1_000L
+        /** Tools that send messages to other people; the only ones full access still asks about. */
+        val OUTWARD_TOOLS = setOf("sms_send", "notification_reply")
 
         /** Model-facing continuation after an engine crash (the interrupted tool calls were closed by session/resume). */
         const val CONTINUE_AFTER_CRASH = APP_PROMPT_PREFIX + "The agent engine stopped unexpectedly and was restarted, so your previous turn was " +

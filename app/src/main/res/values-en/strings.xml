@@ -78,8 +78,8 @@
     <string name="preset_ask">Ask to act</string>
     <string name="preset_full">Full access</string>
     <string name="preset_read_only_desc">Reads only; every action that changes the phone is refused</string>
-    <string name="preset_ask_desc">Asks before each action that changes the phone (default)</string>
-    <string name="preset_full_desc">Approves automatically; dangerous actions still ask</string>
+    <string name="preset_ask_desc">Asks before each action that changes the phone</string>
+    <string name="preset_full_desc">Approves everything; asks only before messaging other people (default)</string>
     <string name="full_confirm_title">Enable full access?</string>
     <string name="full_confirm_body">With full access the agent skips most confirmations and taps, changes settings and files directly; dangerous actions such as deleting files or sending SMS still ask. Only use it when you trust the current task.</string>
     <string name="full_confirm_check">I understand the risk and want to continue</string>

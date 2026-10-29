@@ -14,12 +14,12 @@ enum class ToolGroup(val id: String) {
 
 /**
  * dsh permission presets (ui-permission-presets), mapped onto the app's approval gate:
- * read-only refuses every action that needs approval, ask (dsh "workspace-write", the default)
- * asks for each one, full access approves everything except `dangerous` device tools.
+ * read-only refuses every action that needs approval, ask (dsh "workspace-write") asks for each
+ * one, full access (the default) approves everything except messages sent to other people.
  */
 enum class PermissionPreset(val id: String) {
     ReadOnly("read-only"), Ask("workspace-write"), Full("danger-full-access");
-    companion object { fun of(id: String?) = entries.firstOrNull { it.id == id } ?: Ask }
+    companion object { fun of(id: String?) = entries.firstOrNull { it.id == id } ?: Full }
 }
 
 const val AUTO_SESSION_PREFIX = "auto_"

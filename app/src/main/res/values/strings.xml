@@ -78,8 +78,8 @@
     <string name="preset_ask">操作需确认</string>
     <string name="preset_full">完全权限</string>
     <string name="preset_read_only_desc">只读取信息，拒绝所有改动手机的操作</string>
-    <string name="preset_ask_desc">改动手机前逐次请你审批（默认）</string>
-    <string name="preset_full_desc">自动批准，危险操作仍需确认</string>
+    <string name="preset_ask_desc">改动手机前逐次请你审批</string>
+    <string name="preset_full_desc">全部自动批准，只有给别人发消息前会确认（默认）</string>
     <string name="full_confirm_title">确认启用完全权限？</string>
     <string name="full_confirm_body">启用完全权限后，智能体将减少确认步骤，直接点按、修改设置和文件；删除文件、发送短信等危险操作仍会请你确认。仅建议在你信任当前任务时使用。</string>
     <string name="full_confirm_check">我已了解风险，并愿意继续</string>

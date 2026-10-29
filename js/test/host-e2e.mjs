@@ -13,7 +13,7 @@
 //   6. phase E: faked Android (process.platform = os.platform() = 'android', os.tmpdir()
 //      ignoring TMPDIR like AT_SECURE) so the android branches of the patches run, with the
 //      real model: time context in the device zone, read-only shell without approval, the
-//      仅可查看 preset refusing a write up front, a sensitive read asked once per conversation,
+//      仅可查看 preset refusing a write up front, a sensitive read run without asking,
 //      HOME writes without approval, and an unattended run whose question is auto-answered.
 //
 // Usage: node js/test/host-e2e.mjs [engine.zip] [native-dir]
@@ -626,12 +626,12 @@ if (!PHASES.has('E')) {
       `calls=${calls(s2, 'file_write').length} approvals=${approvals.filter(a => a.sessionId === s2).length}`)
     check('E: the refusal names the read-only permission mode', results(s2).some(t => t.includes('仅可查看') && t.includes('permission mode')))
 
-    // 3. sensitive read: asked once per conversation
+    // 3. sensitive read: runs without asking
     const s3 = `e3-${Date.now()}`
     await run(s3, 'Look up the contacts "Alice" and then "Bob" with contacts_search (two separate calls, one after the other), then list both numbers.')
     const contactCalls = invokes.filter(i => i.sessionId === s3 && i.tool === 'contacts_search').length
     const contactAsks = approvals.filter(a => a.sessionId === s3 && a.toolName === 'contacts_search').length
-    check('E: sensitive read asks once, later calls in the conversation run directly', contactCalls >= 2 && contactAsks === 1, `invokes=${contactCalls} approvals=${contactAsks}`)
+    check('E: sensitive reads run without asking', contactCalls >= 2 && contactAsks === 0, `invokes=${contactCalls} approvals=${contactAsks}`)
 
     // 4. unattended run: told so, and its question is answered automatically
     const s4 = `auto_7_${Date.now()}`
